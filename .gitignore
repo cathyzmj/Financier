@@ -1,0 +1,38 @@
+# ───────────────────────────────────────────────────────────
+#  NEVER COMMIT THESE
+# ───────────────────────────────────────────────────────────
+
+# Your real financial data — holdings, balances, sort codes, card numbers.
+# This must never leave your machine.
+*.db
+*.db-wal
+*.db-shm
+tracker.db
+asset-tracker/
+
+# Secrets — API keys (e.g. the Anthropic key for the upcoming AI features).
+.env
+.env.local
+*.env
+
+# JSON backups exported from the app (they contain your real data).
+financier-backup-*.json
+
+# ───────────────────────────────────────────────────────────
+#  Build & dependency artifacts (regenerated, no need to track)
+# ───────────────────────────────────────────────────────────
+node_modules/
+dist/
+build/
+.vite/
+*.log
+npm-debug.log*
+
+# ───────────────────────────────────────────────────────────
+#  OS / editor noise
+# ───────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
