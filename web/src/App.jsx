@@ -45,6 +45,26 @@ const fmtPct = (n) => (n == null ? '—' : `${n >= 0 ? '+' : ''}${n.toFixed(2)}%
 const pnlClass = (n) => (n == null ? '' : n >= 0 ? 'pos' : 'neg');
 const capitalize = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 
+// Build a CSV from an array of {header, value} column defs over rows, and download it.
+// Each column is [header, accessorFn]. Values are CSV-escaped.
+function exportCsv(filename, columns, rows) {
+  const esc = (v) => {
+    if (v == null) return '';
+    const s = String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const head = columns.map((c) => esc(c[0])).join(',');
+  const body = rows.map((r) => columns.map((c) => esc(c[1](r))).join(',')).join('\n');
+  const csv = head + '\n' + body;
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' }); // BOM for Excel
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${filename}-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 // Render a readable account type from the MECE fields.
 function accountTypeLabel(a) {
   if (a.category === 'current') return a.is_isa ? 'Current · ISA' : 'Current';
@@ -472,6 +492,21 @@ function Portfolio({ holdings, loading, pnlMode, onTogglePnl, onAdd, onMemo, onT
             {sectors.map((s) => <option key={s} value={s}>{s === 'all' ? 'All' : s}</option>)}
           </select>
           <span className="filter-count">{sorted.length} of {holdings.length}</span>
+          <button className="csv-btn" onClick={() => exportCsv('financier-stocks', [
+            ['Ticker', (h) => h.ticker],
+            ['Type', (h) => h.asset_type === 'etf' ? 'ETF' : 'Stock'],
+            ['Sector', (h) => h.sector || ''],
+            ['Shares', (h) => h.total_shares],
+            ['Avg Cost', (h) => h.avg_cost],
+            ['Price', (h) => h.current_price],
+            ['Currency', (h) => h.quote_currency || h.currency],
+            ['Value', (h) => h.market_value],
+            ['P&L', (h) => h.pnl],
+            ['P&L %', (h) => h.pnl_pct],
+            ['Target', (h) => h.target_price],
+            ['Stop', (h) => h.stop_loss],
+            ['Thesis', (h) => h.thesis],
+          ], sorted)}>Export CSV</button>
         </div>
       )}
 
@@ -574,6 +609,25 @@ function BondsView() {
   return (
     <>
       <div className="bonds-actionbar">
+        {bonds.length > 0 && (
+          <button className="csv-btn" onClick={() => exportCsv('financier-bonds', [
+            ['Name', (b) => b.name],
+            ['Issuer', (b) => b.issuer || ''],
+            ['Type', (b) => b.bond_type || ''],
+            ['Currency', (b) => b.currency],
+            ['Face Value', (b) => b.face_value],
+            ['Quantity', (b) => b.quantity],
+            ['Coupon %', (b) => b.coupon_rate],
+            ['Frequency/yr', (b) => b.frequency],
+            ['Buy Price', (b) => b.purchase_price],
+            ['Cost', (b) => b.total_cost],
+            ['Annual Income', (b) => b.annual_income],
+            ['Current Yield %', (b) => b.current_yield],
+            ['HTM Return %', (b) => b.htm_total_return_pct],
+            ['Years to Maturity', (b) => b.years_to_maturity],
+            ['Maturity', (b) => b.maturity_date],
+          ], bonds)}>Export CSV</button>
+        )}
         <button className="btn-primary" onClick={() => setShowAdd(true)}>+ Add bond</button>
       </div>
 
@@ -1408,7 +1462,20 @@ function BudgetTab() {
             </>
           )}
 
-          <div className="divider-label">Expenses</div>
+          <div className="divider-label divider-with-action">
+            <span>Expenses</span>
+            {data?.expenses?.length > 0 && (
+              <button className="csv-btn" onClick={() => exportCsv(`financier-expenses-${month}`, [
+                ['Date', (e) => e.date],
+                ['Category', (e) => e.category],
+                ['Wallet', (e) => e.wallet || ''],
+                ['Note', (e) => e.note || ''],
+                ['Amount', (e) => e.amount],
+                ['Currency', (e) => e.currency],
+                [`In ${baseCur}`, (e) => e.base_amount],
+              ], data.expenses)}>Export CSV</button>
+            )}
+          </div>
           {!data?.expenses?.length ? (
             <div className="empty">No expenses logged this month.</div>
           ) : (
@@ -1651,6 +1718,19 @@ function CashTab() {
           <select value={curFilter} onChange={(e) => setCurFilter(e.target.value)}>
             {currencies.map((c) => <option key={c} value={c}>{c === 'all' ? 'All' : c}</option>)}
           </select>
+          <button className="csv-btn" style={{ marginLeft: 'auto' }} onClick={() => exportCsv('financier-bank-accounts', [
+            ['Bank', (a) => a.bank || a.account_name],
+            ['Product', (a) => a.product || ''],
+            ['Account Ref', (a) => a.account_ref || ''],
+            ['Country', (a) => a.country],
+            ['Currency', (a) => a.currency],
+            ['Type', (a) => accountTypeLabel(a) + (a.is_monthly_saver ? ' · monthly' : '')],
+            ['Balance', (a) => (a.is_monthly_saver && a.accrued_balance != null) ? a.accrued_balance : a.balance],
+            ['Rate %', (a) => a.your_rate],
+            ['Term', (a) => a.term || ''],
+            ['Matures', (a) => a.maturity_date || ''],
+            ['Updated', (a) => (a.last_updated || '').slice(0, 10)],
+          ], allRows)}>Export CSV</button>
         </div>
       )}
       {loading ? (

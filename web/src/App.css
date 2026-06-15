@@ -173,7 +173,20 @@ th.sortable:hover { color: var(--brick); }
   font-family: var(--font-mono); font-size: 0.78rem; color: var(--text); border-radius: 0;
 }
 .filter-count { font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); margin-left: auto; }
-.bonds-actionbar { display: flex; justify-content: flex-end; margin-bottom: 16px; }
+.bonds-actionbar { display: flex; justify-content: flex-end; gap: 10px; margin-bottom: 16px; }
+.csv-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 6px 12px;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.csv-btn:hover { background: var(--input); color: var(--cobalt); border-color: var(--cobalt); }
+.divider-with-action { display: flex; align-items: center; justify-content: space-between; }
 .nav button {
   background: transparent;
   border: 1px solid var(--rule);
