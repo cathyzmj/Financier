@@ -10,13 +10,69 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import https from 'https';
+import dns from 'dns';
+import { execSync } from 'child_process';
+
+// This Mac's IPv6 stack is broken (same reason the server binds 127.0.0.1, not
+// localhost). Some upstreams — notably IBKR's Flex hosts — publish Teredo (2001::)
+// AAAA records that simply hang on connect. Prefer IPv4 for all outbound DNS.
+dns.setDefaultResultOrder('ipv4first');
+// IPv4-only https agent — used for the IBKR Flex requests when connecting directly
+// (no proxy). See getFlexProxy() for the mainland-China proxy path.
+const ipv4Agent = new https.Agent({ family: 4, keepAlive: true });
+
+// From mainland China the GFW blocks IBKR's Flex hosts outright and makes Yahoo /
+// frankfurter flaky. When a local/system HTTP proxy is available — e.g. SakuraCat /
+// Clash on 127.0.0.1:7897 — route ALL outbound data calls through it; otherwise
+// connect directly over IPv4. Explicit IBKR_FLEX_PROXY / HTTPS_PROXY wins; otherwise
+// auto-detect the macOS system proxy so things "just work" whenever the proxy app is on.
+function detectMacProxy() {
+  if (process.platform !== 'darwin') return null;
+  try {
+    const out = execSync('scutil --proxy', { encoding: 'utf8', timeout: 3000 });
+    const on = /HTTPSEnable\s*:\s*1/.test(out);
+    const host = out.match(/HTTPSProxy\s*:\s*([0-9.]+)/)?.[1];
+    const port = out.match(/HTTPSPort\s*:\s*(\d+)/)?.[1];
+    if (on && host && port) return { host, port: Number(port) };
+  } catch { /* scutil unavailable — fall through to a direct connection */ }
+  return null;
+}
+// Cache proxy detection briefly — getPrice/getFxRate call this a lot.
+let _proxyCache = { at: 0, val: null, has: false };
+function getProxy() {
+  const env = process.env.IBKR_FLEX_PROXY || process.env.HTTPS_PROXY || process.env.https_proxy;
+  if (env) {
+    try {
+      const u = new URL(env.includes('://') ? env : `http://${env}`);
+      return { host: u.hostname, port: Number(u.port) || 7897 };
+    } catch { /* malformed proxy string — ignore */ }
+  }
+  if (_proxyCache.has && Date.now() - _proxyCache.at < 30000) return _proxyCache.val;
+  const val = detectMacProxy();
+  _proxyCache = { at: Date.now(), val, has: true };
+  return val;
+}
+// axios options for any outbound data call: via the proxy if present, else direct/IPv4.
+function netOpts() {
+  const p = getProxy();
+  return p ? { proxy: { host: p.host, port: p.port, protocol: 'http' } } : { httpsAgent: ipv4Agent };
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = path.join(os.homedir(), 'asset-tracker', 'tracker.db');
-const SCHEMA_PATH = path.join(__dirname, 'schema.sql');
+// DB path: Electron sets FINANCIER_DB_PATH to the app's userData dir. Standalone
+// dev falls back to ~/asset-tracker/tracker.db (unchanged behaviour).
+const DB_PATH = process.env.FINANCIER_DB_PATH
+  || path.join(os.homedir(), 'asset-tracker', 'tracker.db');
+// Schema lives next to this file; allow override for packaged apps.
+const SCHEMA_PATH = process.env.FINANCIER_SCHEMA_PATH
+  || path.join(__dirname, 'schema.sql');
 const PORT = 8000;
 const HOST = '127.0.0.1';
 const PRICE_TTL_MS = 15 * 60 * 1000; // 15-min cache
+
+// Ensure the DB directory exists (userData dir may not have it yet).
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
 // ---- DB init ----
 const db = new Database(DB_PATH);
@@ -39,6 +95,7 @@ function migrate() {
   // memos — ETF fields
   ensureColumn('memos', 'tracks', 'TEXT');
   ensureColumn('memos', 'expense_ratio', 'REAL');
+  ensureColumn('memos', 'strategy', 'TEXT'); // free-text investing style, user-extensible
   // cash_accounts — MECE banking fields
   ensureColumn('cash_accounts', 'bank', 'TEXT');
   ensureColumn('cash_accounts', 'product', 'TEXT');
@@ -62,8 +119,10 @@ const BACKUP_TABLES = [
 // ---- App ----
 const app = express();
 app.use(express.json());
+// The server only ever binds 127.0.0.1, so it's not network-exposed. Allow the
+// Vite dev origins and Electron's file:// origin (which sends Origin: null / none).
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
+  origin: (origin, cb) => cb(null, true),
 }));
 
 // ---- Helpers: position math ----
@@ -103,7 +162,7 @@ async function getPrice(ticker) {
     const { data } = await axios.get(url, {
       params: { interval: '1d', range: '1d' },
       headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 8000,
+      timeout: 8000, ...netOpts(),
     });
     const r = data?.chart?.result?.[0];
     const meta = r?.meta;
@@ -186,7 +245,7 @@ app.post('/api/holdings', (req, res) => {
     // optional memo fields (all nullable)
     thesis, sector, catalysts, target_price, stop_loss, time_horizon,
     conviction, position_size_pct, macro_context, sector_view,
-    risk_factors, variant_perception, tracks, expense_ratio,
+    risk_factors, variant_perception, tracks, expense_ratio, strategy,
   } = req.body;
 
   if (!ticker || !date || price == null || shares == null) {
@@ -209,13 +268,13 @@ app.post('/api/holdings', (req, res) => {
     db.prepare(`INSERT INTO memos
       (holding_id, thesis, sector, catalysts, target_price, stop_loss, time_horizon,
        conviction, position_size_pct, macro_context, sector_view, risk_factors, variant_perception,
-       tracks, expense_ratio)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+       tracks, expense_ratio, strategy)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(holdingId, thesis ?? null, sector ?? null, catalysts ?? null,
         target_price ?? null, stop_loss ?? null, time_horizon ?? null,
         conviction ?? null, position_size_pct ?? null, macro_context ?? null,
         sector_view ?? null, risk_factors ?? null, variant_perception ?? null,
-        tracks ?? null, expense_ratio ?? null);
+        tracks ?? null, expense_ratio ?? null, strategy ?? null);
 
     db.prepare(`INSERT INTO thesis_history (holding_id, thesis) VALUES (?, ?)`)
       .run(holdingId, thesis.trim());
@@ -301,7 +360,7 @@ const MEMO_FIELDS = new Set([
   'thesis', 'sector', 'catalysts', 'target_price', 'stop_loss', 'time_horizon',
   'conviction', 'position_size_pct', 'macro_context', 'sector_view', 'risk_factors',
   'variant_perception', 'tracks', 'expense_ratio', 'thesis_intact', 'catalyst_status',
-  'exit_date', 'exit_price', 'exit_reason', 'post_mortem',
+  'exit_date', 'exit_price', 'exit_reason', 'post_mortem', 'strategy',
 ]);
 app.patch('/api/holdings/:id/memo', (req, res) => {
   try {
@@ -340,6 +399,192 @@ app.get('/api/holdings/:id/thesis-history', (req, res) => {
     ).all(req.params.id);
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/strategies — distinct strategies you've already used, for suggestions
+app.get('/api/strategies', (req, res) => {
+  try {
+    const rows = db.prepare("SELECT DISTINCT strategy FROM memos WHERE strategy IS NOT NULL AND TRIM(strategy) != '' ORDER BY strategy").all();
+    res.json(rows.map((r) => r.strategy));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ---- Journal / decision-review ----
+// The diary: every position (open + closed) with its REASONING (thesis, intended
+// strategy, conviction, exit reason, post-mortem, thesis history) alongside the
+// operations — the part a broker never captures.
+async function buildJournalRows() {
+  const holdings = db.prepare('SELECT * FROM holdings ORDER BY is_open DESC, ticker').all();
+  const out = [];
+  for (const h of holdings) {
+    const memo = db.prepare('SELECT * FROM memos WHERE holding_id = ?').get(h.id) || {};
+    const txns = db.prepare('SELECT * FROM transactions WHERE holding_id = ? ORDER BY date ASC, id ASC').all(h.id);
+    let boughtShares = 0, boughtCost = 0, soldShares = 0, soldProceeds = 0;
+    for (const t of txns) {
+      if (t.type === 'buy') { boughtShares += t.shares; boughtCost += t.price * t.shares; }
+      else { soldShares += t.shares; soldProceeds += t.price * t.shares; }
+    }
+    const totalShares = boughtShares - soldShares;
+    const avgCost = boughtShares > 0 ? boughtCost / boughtShares : 0;
+    const realizedPnl = soldShares > 0 ? soldProceeds - soldShares * avgCost : 0;
+    const firstBuy = txns.find((t) => t.type === 'buy');
+    const lastSell = [...txns].reverse().find((t) => t.type === 'sell');
+    let currentPrice = null, unrealizedPnl = null;
+    if (h.is_open && totalShares > 0.0000001) {
+      const p = await getPrice(h.ticker);
+      currentPrice = p.price;
+      if (currentPrice != null) unrealizedPnl = round2(totalShares * currentPrice - totalShares * avgCost);
+    }
+    const hist = db.prepare('SELECT thesis, logged_at FROM thesis_history WHERE holding_id = ? ORDER BY logged_at ASC, id ASC').all(h.id);
+    out.push({
+      id: h.id, ticker: h.ticker, name: h.name, asset_type: h.asset_type, currency: h.currency,
+      is_open: h.is_open,
+      thesis: memo.thesis ?? null, sector: memo.sector ?? null, strategy: memo.strategy ?? null, conviction: memo.conviction ?? null,
+      time_horizon: memo.time_horizon ?? null, catalysts: memo.catalysts ?? null,
+      risk_factors: memo.risk_factors ?? null, variant_perception: memo.variant_perception ?? null,
+      target_price: memo.target_price ?? null, stop_loss: memo.stop_loss ?? null,
+      thesis_intact: memo.thesis_intact ?? null,
+      exit_reason: memo.exit_reason ?? null, exit_price: memo.exit_price ?? null,
+      exit_date: memo.exit_date ?? null, post_mortem: memo.post_mortem ?? null,
+      entry_date: firstBuy ? firstBuy.date : null,
+      avg_cost: round2(avgCost),
+      total_shares: totalShares,
+      current_price: currentPrice,
+      realized_pnl: round2(realizedPnl),
+      unrealized_pnl: unrealizedPnl,
+      last_sell_date: lastSell ? lastSell.date : null,
+      transactions: txns.map((t) => ({ type: t.type, date: t.date, shares: t.shares, price: t.price })),
+      thesis_history: hist,
+    });
+  }
+  return out;
+}
+
+function daysBetween(a, b) {
+  if (!a || !b) return null;
+  return Math.round((new Date(b + 'T00:00:00') - new Date(a + 'T00:00:00')) / 86400000);
+}
+
+// Roll the rows into deterministic aggregates so the AI never has to (and can't)
+// invent numbers — it interprets, we compute. This is the machine-optimal payload.
+function buildAnalysisPayload(rows) {
+  const today = new Date().toISOString().slice(0, 10);
+  const open = rows.filter((r) => r.is_open);
+  const closed = rows.filter((r) => !r.is_open);
+
+  const byStrategy = {};
+  for (const r of rows) {
+    const k = r.strategy || '(untagged)';
+    const s = byStrategy[k] || (byStrategy[k] = { count: 0, open: 0, closed: 0, realized: 0, holdDays: [], wins: 0, losses: 0 });
+    s.count++; if (r.is_open) s.open++; else s.closed++;
+    if (!r.is_open) {
+      s.realized += r.realized_pnl || 0;
+      if ((r.realized_pnl || 0) > 0) s.wins++; else if ((r.realized_pnl || 0) < 0) s.losses++;
+      const d = daysBetween(r.entry_date, r.exit_date || r.last_sell_date);
+      if (d != null) s.holdDays.push(d);
+    }
+  }
+  const by_strategy = Object.entries(byStrategy).map(([strategy, s]) => ({
+    strategy, positions: s.count, open: s.open, closed: s.closed, realized_pnl: round2(s.realized),
+    avg_hold_days: s.holdDays.length ? Math.round(s.holdDays.reduce((a, b) => a + b, 0) / s.holdDays.length) : null,
+    win_rate_closed_pct: (s.wins + s.losses) ? round2((s.wins / (s.wins + s.losses)) * 100) : null,
+  }));
+
+  const byExit = {};
+  for (const r of closed) {
+    const k = r.exit_reason || '(no reason logged)';
+    const e = byExit[k] || (byExit[k] = { count: 0, realized: 0 });
+    e.count++; e.realized += r.realized_pnl || 0;
+  }
+  const by_exit_reason = Object.entries(byExit).map(([reason, e]) => ({ reason, count: e.count, realized_pnl: round2(e.realized) }));
+
+  const byConv = {};
+  for (const r of rows) {
+    if (r.conviction == null) continue;
+    const c = byConv[r.conviction] || (byConv[r.conviction] = { positions: 0, closed: 0, realized: 0 });
+    c.positions++; if (!r.is_open) { c.closed++; c.realized += r.realized_pnl || 0; }
+  }
+  const by_conviction = Object.entries(byConv)
+    .map(([conviction, c]) => ({ conviction: Number(conviction), positions: c.positions, closed: c.closed, realized_pnl: round2(c.realized) }))
+    .sort((a, b) => a.conviction - b.conviction);
+
+  const openHold = open.map((r) => daysBetween(r.entry_date, today)).filter((d) => d != null);
+  return {
+    generated_at: new Date().toISOString(),
+    note: 'Reasoning is first-class (thesis, intended strategy, conviction, exit_reason, post_mortem, thesis_history). P&L is average-cost and approximate — secondary to decision quality.',
+    counts: { total: rows.length, open: open.length, closed: closed.length },
+    totals: {
+      realized_pnl: round2(closed.reduce((a, r) => a + (r.realized_pnl || 0), 0)),
+      unrealized_pnl: round2(open.reduce((a, r) => a + (r.unrealized_pnl || 0), 0)),
+    },
+    avg_open_hold_days: openHold.length ? Math.round(openHold.reduce((a, b) => a + b, 0) / openHold.length) : null,
+    by_strategy, by_exit_reason, by_conviction,
+    positions: rows,
+  };
+}
+
+const REVIEW_SYSTEM = `You are a sharp, candid investing research partner reviewing a private investor's decision journal. This is NOT a performance report — their broker already shows returns. Examine the RELATIONSHIP between their stated reasons and their actual decisions and outcomes.
+
+Focus on:
+- Stated vs revealed strategy: each position has an intended "strategy". From holding period, entry/exit timing and exit reason, infer the strategy their behaviour ACTUALLY reflects, and flag mismatches by name.
+- Thesis vs outcome: did the thesis play out? Did the exit reason fit the thesis and stated horizon? Note thesis drift in thesis_history that reads like after-the-fact rationalisation.
+- Cross-position patterns: selling winners early, holding losers, impatience vs stated horizon, conviction calibration (do higher-conviction positions actually do better?), exit-reason discipline.
+- End with 2-3 pointed questions that would sharpen their process.
+
+Rules: Use ONLY numbers in the payload — never invent figures. No buy/sell/hold recommendations, no price predictions. Be direct; challenge the thinking, don't flatter. If the sample is small (few closed trades), say so and frame points as hypotheses. Write for a human: clear prose, short "## " sections, no raw-number tables, no preamble about your process.`;
+
+const STYLE_SYSTEM = `You are a sharp investing research partner profiling a private investor's STYLE from their decision journal. Describe what kind of investor they actually are, grounded only in the data: holding-period behaviour, the mix of strategies and how each performs, conviction calibration, single-stock vs fund tilt, sector/strategy concentration, risk/return posture. Explicitly contrast the strategies they INTEND with what their behaviour REVEALS.
+
+Rules: Use ONLY numbers in the payload — never invent figures. No buy/sell/hold recommendations, no price predictions. Be candid, not flattering. If the sample is small, say so and frame as hypotheses. Write for a human: clear prose, short "## " sections, no raw-number tables, no preamble.`;
+
+// Claude via raw HTTP through the SAME proxy as every other outbound call —
+// api.anthropic.com is blocked from mainland China, so it must use netOpts() too.
+async function callClaude(system, userText, key) {
+  const { data } = await axios.post('https://api.anthropic.com/v1/messages', {
+    model: 'claude-opus-4-8',
+    max_tokens: 8000,
+    thinking: { type: 'adaptive' },
+    system,
+    messages: [{ role: 'user', content: userText }],
+  }, {
+    headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    timeout: 120000, ...netOpts(),
+  });
+  const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+  return text || 'No analysis returned.';
+}
+
+// GET /api/journal — diary rows for the Journal tab.
+app.get('/api/journal', async (req, res) => {
+  try { res.json(await buildJournalRows()); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/journal/payload — machine-optimal export (rows + aggregates), the exact
+// structured form fed to the AI; download or copy to feed any AI yourself.
+app.get('/api/journal/payload', async (req, res) => {
+  try { res.json(buildAnalysisPayload(await buildJournalRows())); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/journal/review { mode:'review'|'style', api_key? } — human-readable AI
+// analysis. Key from body (UI) or ANTHROPIC_API_KEY env.
+app.post('/api/journal/review', async (req, res) => {
+  try {
+    const key = (req.body && req.body.api_key) || process.env.ANTHROPIC_API_KEY;
+    if (!key) return res.json({ error: 'no_key' });
+    const mode = req.body && req.body.mode === 'style' ? 'style' : 'review';
+    const payload = buildAnalysisPayload(await buildJournalRows());
+    if (payload.counts.total === 0) return res.json({ review: 'Nothing to analyse yet — add a position with a thesis first.', mode, model: 'claude-opus-4-8' });
+    const userText = `Here is the investor's decision journal as JSON. Analyse it.\n\n${JSON.stringify(payload)}`;
+    const review = await callClaude(mode === 'style' ? STYLE_SYSTEM : REVIEW_SYSTEM, userText, key);
+    res.json({ review, mode, model: 'claude-opus-4-8' });
+  } catch (err) {
+    const s = err.response?.status;
+    if (s === 401) return res.status(502).json({ error: 'Anthropic rejected the API key — check it.' });
+    if (s === 429) return res.status(502).json({ error: 'Anthropic rate limit — wait a moment and retry.' });
+    res.status(502).json({ error: err.message });
+  }
 });
 
 // =====================================================================
@@ -428,7 +673,7 @@ app.post('/api/cash/refresh-rates', async (req, res) => {
     // BOE official Bank Rate via the IADB CSV series IUDBEDR (latest observation).
     const url = 'https://www.bankofengland.co.uk/boeapps/iadb/fromshowcolumns.asp'
       + '?csv.x=yes&Datefrom=01/Jan/2024&Dateto=now&SeriesCodes=IUDBEDR&CSVF=TN&UsingCodes=Y&VPD=Y&VFD=N';
-    const { data } = await axios.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 10000 });
+    const { data } = await axios.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 10000, ...netOpts() });
     const lines = String(data).trim().split('\n').filter(Boolean);
     const last = lines[lines.length - 1].split(',');
     const rateValue = parseFloat(last[last.length - 1]);
@@ -464,7 +709,7 @@ app.get('/api/search/:query', async (req, res) => {
     const { data } = await axios.get('https://query1.finance.yahoo.com/v1/finance/search', {
       params: { q, quotesCount: 8, newsCount: 0 },
       headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 6000,
+      timeout: 6000, ...netOpts(),
     });
     const results = (data?.quotes || [])
       .filter((x) => x.symbol && (x.quoteType === 'EQUITY' || x.quoteType === 'ETF'))
@@ -531,7 +776,7 @@ async function getHistory(ticker, period1Unix) {
     const { data } = await axios.get(url, {
       params: { interval: '1d', period1: period1Unix, period2: Math.floor(Date.now() / 1000) },
       headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 10000,
+      timeout: 10000, ...netOpts(),
     });
     const r = data?.chart?.result?.[0];
     const ts = r?.timestamp || [];
@@ -637,8 +882,9 @@ app.get('/api/overview/timeseries', async (req, res) => {
     const start = periodStart(period);
     const period1 = Math.floor(start.getTime() / 1000);
 
+    const windowStart = start.toISOString().slice(0, 10);
     const holdings = db.prepare('SELECT * FROM holdings').all();
-    if (holdings.length === 0) return res.json({ period, points: [] });
+    if (holdings.length === 0) return res.json({ period, window_start: windowStart, points: [] });
 
     // Fetch historical closes + all transactions for every holding.
     const histByHolding = {};
@@ -689,7 +935,7 @@ app.get('/api/overview/timeseries', async (req, res) => {
       });
     }
 
-    res.json({ period, points });
+    res.json({ period, window_start: windowStart, points });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -706,7 +952,7 @@ async function getFxRate(from, to) {
   }
   try {
     const { data } = await axios.get('https://api.frankfurter.app/latest', {
-      params: { from: f, to: t }, timeout: 8000,
+      params: { from: f, to: t }, timeout: 8000, ...netOpts(),
     });
     const rate = data?.rates?.[t];
     if (rate == null) throw new Error('no rate');
@@ -981,6 +1227,344 @@ app.delete('/api/bonds/:id', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.listen(PORT, HOST, () => {
-  console.log(`Financier backend running at http://${HOST}:${PORT}`);
+// Start the server only when run directly (node server.js), not when imported
+// by the Electron main process (which calls startServer itself).
+export function startServer() {
+// ---- IBKR Flex Web Service ----
+// Two-step protocol: (1) SendRequest with token+queryId returns a ReferenceCode;
+// (2) GetStatement with token+ReferenceCode returns the report XML.
+const FLEX_BASE = 'https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService';
+
+function flexAttr(tag, attr) {
+  const m = tag.match(new RegExp(`${attr}="([^"]*)"`));
+  return m ? m[1] : null;
+}
+
+// IBKR reports bare local symbols (e.g. "2DG"); Yahoo needs an exchange suffix
+// ("2DG.MU"). Map the IBKR listing-exchange code to a Yahoo suffix; US listings get
+// none. Best-effort default — the import UI lets you correct it and remembers the fix,
+// so unknown exchanges still end up right.
+const US_EXCHANGES = new Set(['NYSE','NASDAQ','NMS','ARCA','AMEX','BATS','IEX','ISLAND','PINK','NYSENAT','PSX']);
+const EXCHANGE_SUFFIX = {
+  LSE: '.L', LSEETF: '.L',
+  IBIS: '.DE', IBIS2: '.DE', XETRA: '.DE', FWB: '.F', FWB2: '.F', SWB: '.SG',
+  GETTEX: '.MU', MUN: '.MU', MUNICH: '.MU', TGATE: '.TG', BVME: '.MI', 'BVME.ETF': '.MI', BIT: '.MI',
+  AEB: '.AS', SBF: '.PA', 'ENEXT.BE': '.BR', 'ENEXT.PA': '.PA', BVL: '.LS',
+  SWX: '.SW', EBS: '.SW', BM: '.MC', SFB: '.ST', OMXNO: '.OL', OSE: '.OL', CPH: '.CO', HEX: '.HE', VSE: '.VI', WSE: '.WA',
+  SEHK: '.HK', SEHKNTL: '.HK', TSEJ: '.T', SGX: '.SI', ASX: '.AX', KSE: '.KS', KOSDAQ: '.KQ', TWSE: '.TW', SET: '.BK', NSE: '.NS', BSE: '.BO',
+  TSE: '.TO', VENTURE: '.V',
+};
+const CURRENCY_SUFFIX = { GBP: '.L', HKD: '.HK', JPY: '.T', SGD: '.SI', AUD: '.AX', KRW: '.KS', TWD: '.TW', CHF: '.SW', SEK: '.ST', NOK: '.OL', DKK: '.CO', CAD: '.TO' };
+function yahooSymbol(symbol, exchange, currency) {
+  const sym = (symbol || '').toUpperCase();
+  if (!sym || sym.includes('.')) return sym;        // already suffixed
+  const ex = (exchange || '').toUpperCase();
+  if (US_EXCHANGES.has(ex) || (!ex && currency === 'USD')) return sym; // US: no suffix
+  if (EXCHANGE_SUFFIX[ex]) return sym + EXCHANGE_SUFFIX[ex];
+  const cs = CURRENCY_SUFFIX[(currency || '').toUpperCase()];
+  return cs ? sym + cs : sym;                        // rough fallback; user can fix
+}
+
+// Parse <OpenPosition .../> rows from a Flex statement into normalised holdings.
+function parseFlexPositions(xml) {
+  const rows = xml.match(/<OpenPosition\b[^>]*\/>/g) || [];
+  const positions = [];
+  for (const row of rows) {
+    const symbol = flexAttr(row, 'symbol');
+    const qty = parseFloat(flexAttr(row, 'position'));
+    if (!symbol || !qty) continue;
+    const costPrice = parseFloat(flexAttr(row, 'costBasisPrice') || flexAttr(row, 'openPrice') || '0');
+    const assetCat = (flexAttr(row, 'assetCategory') || '').toUpperCase();
+    const currency = flexAttr(row, 'currency') || 'USD';
+    const exchange = flexAttr(row, 'listingExchange') || flexAttr(row, 'exchange') || null;
+    positions.push({
+      symbol,
+      name: flexAttr(row, 'description') || null,
+      quantity: qty,
+      cost_price: costPrice || null,
+      currency,
+      listing_exchange: exchange,
+      yahoo_symbol: yahooSymbol(symbol, exchange, currency),
+      asset_type: assetCat === 'ETF' ? 'etf' : 'stock',
+      asset_category: assetCat,
+    });
+  }
+  return positions;
+}
+
+// Parse <Trade .../> rows (equities only — skip FX/options/etc.) into normalised fills.
+function parseFlexTrades(xml) {
+  const rows = xml.match(/<Trade\b[^>]*\/>/g) || [];
+  const trades = [];
+  for (const row of rows) {
+    const assetCat = (flexAttr(row, 'assetCategory') || '').toUpperCase();
+    if (assetCat !== 'STK' && assetCat !== 'ETF') continue; // ignore GBP.USD etc.
+    const symbol = flexAttr(row, 'symbol');
+    const qty = Math.abs(parseFloat(flexAttr(row, 'quantity')));
+    const price = parseFloat(flexAttr(row, 'tradePrice'));
+    const side = (flexAttr(row, 'buySell') || '').toUpperCase();
+    const dt = flexAttr(row, 'dateTime') || flexAttr(row, 'tradeDate') || '';
+    const date = dt.slice(0, 8).replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3'); // YYYY-MM-DD
+    if (!symbol || !qty || Number.isNaN(price) || !(side === 'BUY' || side === 'SELL')) continue;
+    trades.push({ symbol: symbol.toUpperCase(), date, type: side === 'BUY' ? 'buy' : 'sell', shares: qty, price });
+  }
+  return trades;
+}
+
+// Build a transaction list for one position by combining its in-window trades with the
+// Open Positions baseline. Trades give the granular fills; if the position predates the
+// window, one synthetic "opening" buy reconciles the remainder to IBKR's average cost.
+function buildPositionTxns(openPos, trades, windowStartIso, label = 'IBKR') {
+  const fills = trades
+    .filter((t) => t.symbol === openPos.symbol.toUpperCase())
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const P = openPos.quantity;
+  const A = openPos.cost_price; // broker average cost
+  let buyQ = 0, buyCost = 0, sellQ = 0;
+  for (const f of fills) {
+    if (f.type === 'buy') { buyQ += f.shares; buyCost += f.shares * f.price; }
+    else sellQ += f.shares;
+  }
+  const txns = [];
+  // Shares not accounted for by in-window fills — acquired before the window, or the
+  // whole position when there are no fills at all (e.g. Trading212 positions).
+  const openingQ = Math.round((P - (buyQ - sellQ)) * 1e6) / 1e6;
+  if (openingQ > 0.0001 && A != null) {
+    const openingCost = P * A - buyCost;             // remainder of the cost basis
+    const openingPrice = openingCost > 0 ? openingCost / openingQ : A;
+    txns.push({ type: 'buy', date: openPos.opening_date || windowStartIso,
+      price: Math.round(openingPrice * 1e6) / 1e6, shares: openingQ,
+      notes: `Opening position (average cost) — ${label}` });
+  }
+  for (const f of fills) txns.push({ type: f.type, date: f.date, price: f.price, shares: f.shares, notes: `Imported from ${label}` });
+  return txns;
+}
+
+// Shared import engine for any broker. `positions` are normalised open positions;
+// `trades` are individual fills (empty for sources without trade history). Creates a
+// new holding (thesis required) per selection, or rebuilds a held one's transactions.
+function importSelections(selections, positions, trades, windowStartIso, label) {
+  const bySymbol = new Map(positions.map((p) => [p.symbol.toUpperCase(), p]));
+  const existing = new Map(db.prepare('SELECT id, ticker FROM holdings').all().map((h) => [h.ticker.toUpperCase(), h.id]));
+  const today = new Date().toISOString().slice(0, 10);
+  let added = 0, resynced = 0; const skipped = []; const errors = [];
+  const insertTxn = db.prepare(`INSERT INTO transactions (holding_id, type, date, price, shares, notes) VALUES (?, ?, ?, ?, ?, ?)`);
+  const tx = db.transaction(() => {
+    for (const sel of selections) {
+      const srcSym = String(sel.symbol || '').toUpperCase();
+      const p = bySymbol.get(srcSym);
+      if (!p) { errors.push(`${srcSym}: not in latest ${label} data`); continue; }
+      const ticker = String(sel.ticker || p.yahoo_symbol || p.symbol).trim().toUpperCase();
+      if (!ticker) { errors.push(`${srcSym}: ticker required`); continue; }
+      const built = buildPositionTxns(p, trades, windowStartIso, label);
+      const txns = built.length ? built
+        : [{ type: 'buy', date: p.opening_date || today, price: p.cost_price ?? 0, shares: p.quantity, notes: `Imported from ${label}` }];
+      if (existing.has(ticker)) {
+        const holdingId = existing.get(ticker);          // already held → rebuild its history, keep memo
+        db.prepare('DELETE FROM transactions WHERE holding_id = ?').run(holdingId);
+        for (const t of txns) insertTxn.run(holdingId, t.type, t.date, t.price, t.shares, t.notes);
+        const { totalShares } = computePosition(holdingId);
+        db.prepare('UPDATE holdings SET is_open = ? WHERE id = ?').run(totalShares > 0.0000001 ? 1 : 0, holdingId);
+        resynced++;
+      } else {
+        const thesis = String(sel.thesis || '').trim();
+        if (!thesis) { errors.push(`${ticker}: thesis required`); continue; }
+        const h = db.prepare(`INSERT INTO holdings (ticker, name, asset_type, currency) VALUES (?, ?, ?, ?)`)
+          .run(ticker, p.name, p.asset_type, p.currency);
+        const holdingId = h.lastInsertRowid;
+        for (const t of txns) insertTxn.run(holdingId, t.type, t.date, t.price, t.shares, t.notes);
+        db.prepare(`INSERT INTO memos (holding_id, thesis) VALUES (?, ?)`).run(holdingId, thesis);
+        db.prepare(`INSERT INTO thesis_history (holding_id, thesis) VALUES (?, ?)`).run(holdingId, thesis);
+        existing.set(ticker, holdingId);
+        added++;
+      }
+    }
+  });
+  tx();
+  return { added, resynced, skipped, errors };
+}
+
+async function fetchFlexStatement(token, queryId) {
+  // IBKR is blocked from mainland China. Route through a local/system proxy when one
+  // is present (SakuraCat/Clash etc.); otherwise connect directly over IPv4.
+  const proxy = getProxy();
+  const net = netOpts();
+  if (proxy) console.log(`IBKR: routing Flex calls via proxy ${proxy.host}:${proxy.port}`);
+
+  // Step 1: request the statement, get a reference code.
+  const send = await axios.get(`${FLEX_BASE}/SendRequest`, {
+    ...net, params: { t: token, q: queryId, v: 3 }, timeout: 20000,
+  });
+  const sendXml = String(send.data);
+  const refCode = sendXml.match(/<ReferenceCode>(\d+)<\/ReferenceCode>/)?.[1];
+  const errMsg = sendXml.match(/<ErrorMessage>([^<]*)<\/ErrorMessage>/)?.[1];
+  if (!refCode) {
+    throw new Error(errMsg || 'IBKR did not return a reference code — check token and query ID.');
+  }
+  // IBKR returns the host to fetch the statement from (gdcdyn), which differs from
+  // the SendRequest host (ndcdyn). Use the URL it hands back when present.
+  const stmtUrl = sendXml.match(/<Url>([^<]+)<\/Url>/)?.[1] || `${FLEX_BASE}/GetStatement`;
+
+  // Step 2: IBKR generates the report asynchronously. Poll, retrying transient
+  // network errors so one slow attempt doesn't abort the whole import.
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await new Promise((r) => setTimeout(r, attempt === 0 ? 2000 : 3000));
+    let xml;
+    try {
+      const stmt = await axios.get(stmtUrl, {
+        ...net, params: { t: token, q: refCode, v: 3 }, timeout: 20000,
+      });
+      xml = String(stmt.data);
+    } catch (e) {
+      if (attempt === 9) throw e; // out of retries — surface the error
+      continue;
+    }
+    if (/<ErrorCode>1019<\/ErrorCode>/.test(xml) || /generation in progress/i.test(xml)) continue;
+    const err = xml.match(/<ErrorMessage>([^<]*)<\/ErrorMessage>/)?.[1];
+    if (err && !/<OpenPosition/.test(xml)) throw new Error(`IBKR: ${err}`);
+    return xml;
+  }
+  throw new Error('IBKR statement was not ready after several attempts — try again shortly.');
+}
+
+function getFlexCreds(req) {
+  const token = (req.body && req.body.token) || process.env.IBKR_FLEX_TOKEN;
+  const queryId = (req.body && req.body.query_id) || process.env.IBKR_FLEX_QUERY_ID;
+  return { token, queryId };
+}
+
+// POST /api/ibkr/preview — fetch & parse positions, mark which are new, DON'T save
+app.post('/api/ibkr/preview', async (req, res) => {
+  try {
+    const { token, queryId } = getFlexCreds(req);
+    if (!token || !queryId) return res.status(400).json({ error: 'IBKR Flex token and query ID required.' });
+    const xml = await fetchFlexStatement(token, queryId);
+    const positions = parseFlexPositions(xml);
+    const existing = new Set(db.prepare('SELECT ticker FROM holdings').all().map((h) => h.ticker.toUpperCase()));
+    const preview = positions.map((p) => ({ ...p, is_new: !existing.has((p.yahoo_symbol || p.symbol).toUpperCase()) }));
+    const accountId = xml.match(/<FlexStatement\b[^>]*\baccountId="([^"]*)"/)?.[1] || null;
+    res.json({ account_id: accountId, count: positions.length, new_count: preview.filter((p) => p.is_new).length, positions: preview });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
 });
+
+// POST /api/ibkr/sync — import the positions the user selected, each with its own
+// (required) thesis and a confirmed Yahoo ticker. Body: { selections: [{ symbol,
+// ticker, thesis }] }. Only inserts tickers not already held; nothing is overwritten.
+app.post('/api/ibkr/sync', async (req, res) => {
+  try {
+    const { token, queryId } = getFlexCreds(req);
+    if (!token || !queryId) return res.status(400).json({ error: 'IBKR Flex token and query ID required.' });
+    const selections = Array.isArray(req.body?.selections) ? req.body.selections : null;
+    if (!selections || selections.length === 0) {
+      return res.status(400).json({ error: 'No positions selected to import.' });
+    }
+    const xml = await fetchFlexStatement(token, queryId);
+    const positions = parseFlexPositions(xml);
+    const trades = parseFlexTrades(xml);
+    const m = xml.match(/<FlexStatement\b[^>]*\bfromDate="(\d{4})(\d{2})(\d{2})"/);
+    const windowStartIso = m ? `${m[1]}-${m[2]}-${m[3]}` : new Date().toISOString().slice(0, 10);
+    res.json(importSelections(selections, positions, trades, windowStartIso, 'IBKR'));
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ---- Trading212 ----
+// REST API: Authorization header carries the raw API key. Live vs practice = host.
+function t212Base(env) { return env === 'demo' ? 'https://demo.trading212.com' : 'https://live.trading212.com'; }
+function getT212Creds(req) {
+  return {
+    apiKey: (req.body && req.body.api_key) || process.env.T212_API_KEY,
+    env: (req.body && req.body.environment) || 'live',
+  };
+}
+function t212Err(err) {
+  const s = err.response?.status;
+  if (s === 401 || s === 403) return 'Trading212 rejected the API key — check it has the Portfolio permission and matches the chosen (live/practice) account.';
+  if (s === 429) return 'Trading212 rate limit hit — wait a minute and try again.';
+  return err.message;
+}
+// Instruments metadata is large and heavily rate-limited — cache it per process.
+let _t212Instruments = { at: 0, base: null, map: null };
+async function getT212Instruments(base, apiKey) {
+  if (_t212Instruments.map && _t212Instruments.base === base && Date.now() - _t212Instruments.at < 24 * 3600 * 1000) {
+    return _t212Instruments.map;
+  }
+  const { data } = await axios.get(`${base}/api/v0/equity/metadata/instruments`, {
+    headers: { Authorization: apiKey }, timeout: 30000, ...netOpts(),
+  });
+  const map = new Map();
+  for (const i of (Array.isArray(data) ? data : [])) map.set(i.ticker, i);
+  _t212Instruments = { at: Date.now(), base, map };
+  return map;
+}
+// Fetch open positions and normalise them into the same shape the importer expects.
+async function fetchT212Positions(base, apiKey) {
+  const { data } = await axios.get(`${base}/api/v0/equity/portfolio`, {
+    headers: { Authorization: apiKey }, timeout: 20000, ...netOpts(),
+  });
+  const rows = Array.isArray(data) ? data : [];
+  let instruments = new Map();
+  try { instruments = await getT212Instruments(base, apiKey); } catch { /* metadata optional */ }
+  return rows.map((r) => {
+    const meta = instruments.get(r.ticker) || {};
+    const bare = String(meta.shortName || String(r.ticker).split('_')[0] || r.ticker).toUpperCase();
+    const currency = meta.currencyCode || 'USD';
+    const type = String(meta.type || '').toUpperCase() === 'ETF' ? 'etf' : 'stock';
+    return {
+      symbol: bare,
+      name: meta.name || null,
+      quantity: r.quantity,
+      cost_price: r.averagePrice != null ? r.averagePrice : null,
+      currency,
+      listing_exchange: null,
+      yahoo_symbol: yahooSymbol(bare, null, currency),
+      asset_type: type,
+      asset_category: type.toUpperCase(),
+      opening_date: r.initialFillDate ? String(r.initialFillDate).slice(0, 10) : null,
+      t212_ticker: r.ticker,
+    };
+  });
+}
+
+// POST /api/t212/preview — fetch & normalise positions, mark which are new
+app.post('/api/t212/preview', async (req, res) => {
+  try {
+    const { apiKey, env } = getT212Creds(req);
+    if (!apiKey) return res.status(400).json({ error: 'Trading212 API key required.' });
+    const positions = await fetchT212Positions(t212Base(env), apiKey);
+    const existing = new Set(db.prepare('SELECT ticker FROM holdings').all().map((h) => h.ticker.toUpperCase()));
+    const preview = positions.map((p) => ({ ...p, is_new: !existing.has((p.yahoo_symbol || p.symbol).toUpperCase()) }));
+    res.json({ count: positions.length, new_count: preview.filter((p) => p.is_new).length, positions: preview });
+  } catch (err) {
+    res.status(502).json({ error: t212Err(err) });
+  }
+});
+
+// POST /api/t212/sync — import the selected positions (single buy at average cost;
+// Trading212 portfolio carries no per-trade history yet)
+app.post('/api/t212/sync', async (req, res) => {
+  try {
+    const { apiKey, env } = getT212Creds(req);
+    if (!apiKey) return res.status(400).json({ error: 'Trading212 API key required.' });
+    const selections = Array.isArray(req.body?.selections) ? req.body.selections : null;
+    if (!selections || selections.length === 0) return res.status(400).json({ error: 'No positions selected to import.' });
+    const positions = await fetchT212Positions(t212Base(env), apiKey);
+    const today = new Date().toISOString().slice(0, 10);
+    res.json(importSelections(selections, positions, [], today, 'Trading212'));
+  } catch (err) {
+    res.status(502).json({ error: t212Err(err) });
+  }
+});
+
+  return app.listen(PORT, HOST, () => {
+    console.log(`Financier backend running at http://${HOST}:${PORT}`);
+  });
+}
+
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) startServer();
+
+export { app, DB_PATH };

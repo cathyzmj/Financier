@@ -9,9 +9,28 @@ import './App.css';
 // Backend MUST be 127.0.0.1 — localhost resolves to IPv6 on this Mac and refuses connection.
 const API = 'http://127.0.0.1:8000/api';
 
+// Bump on each released change set (semver: MAJOR.MINOR.PATCH). Shown in the header.
+const APP_VERSION = '2.8.0';
+
+// Common Yahoo Finance exchange suffixes — offered as suggestions when editing an
+// IBKR import ticker (e.g. typing "2DG." suggests 2DG.MU, 2DG.F, …).
+const YAHOO_SUFFIXES = ['.MU', '.F', '.DE', '.SG', '.BE', '.DU', '.HM', '.L', '.PA', '.AS', '.BR', '.MI', '.MC', '.SW', '.ST', '.OL', '.CO', '.HE', '.VI', '.WA', '.HK', '.T', '.SI', '.AX', '.KS', '.TW', '.TO', '.V'];
+
 const SECTORS = ['TMT', 'Healthcare', 'Energy', 'Consumer', 'Financials', 'Industrials', 'Other'];
 const TERMS = ['Short', 'Medium', 'Long'];
-const BANKS = ['HSBC', 'Lloyds', 'Barclays', 'NatWest', 'Santander', 'Halifax', 'Nationwide', 'Monzo', 'Revolut', 'Starling', 'Chase', 'TSB', 'Co-operative Bank', 'First Direct', 'Metro Bank', 'Virgin Money', 'ICBC', 'Bank of China', 'China Construction Bank', 'China Merchants Bank', 'Citibank', 'JPMorgan Chase', 'Bank of America', 'Wells Fargo', 'Goldman Sachs (Marcus)', 'Standard Chartered', 'DBS', 'OCBC', 'Other'];
+// Seed investing-style strategies, shown as a visual picker (sticker + description so
+// each is self-explanatory). Free-text + extensible: type a new one and it's
+// remembered (appears as a chip next time).
+const STRATEGY_PRESETS = [
+  { label: 'Macro-dip ETF', icon: '📉', desc: 'Hold an index/ETF, add on macro pullbacks' },
+  { label: 'Industry growth', icon: '🚀', desc: 'Pick a stock, wait for exponential growth' },
+  { label: 'Technical', icon: '📊', desc: 'Chart & technical signals' },
+  { label: 'Sentiment', icon: '🗣️', desc: 'Market sentiment / momentum' },
+  { label: 'Income', icon: '💵', desc: 'Bonds / dividends for yield' },
+  { label: 'Other', icon: '✳️', desc: 'Something else' },
+];
+const STRATEGIES = STRATEGY_PRESETS.map((p) => p.label);
+const BANKS = ['HSBC', 'Lloyds', 'Barclays', 'NatWest', 'Santander', 'Halifax', 'Nationwide', 'Monzo', 'Revolut', 'Starling', 'Chase', 'TSB', 'Co-operative Bank', 'First Direct', 'Metro Bank', 'Virgin Money', 'ICBC (工商银行)', 'China Construction Bank (建设银行)', 'Agricultural Bank of China (农业银行)', 'Bank of China (中国银行)', 'Postal Savings Bank of China (邮政储蓄)', 'Bank of Communications (交通银行)', 'China Merchants Bank (招商银行)', 'CITIC Bank (中信银行)', 'China Everbright Bank (光大银行)', 'Ping An Bank (平安银行)', 'Citibank', 'JPMorgan Chase', 'Bank of America', 'Wells Fargo', 'Goldman Sachs (Marcus)', 'Standard Chartered', 'DBS', 'OCBC'];
 const ACCESS_TYPES = [
   { value: 'easy_access', label: 'Easy-access' },
   { value: 'fixed', label: 'Fixed-rate' },
@@ -34,7 +53,15 @@ function addMonths(isoDate, months) {
 const EXIT_REASONS = ['TakeProfit', 'StopLoss', 'ThesisBroken', 'BetterOpp', 'Other'];
 const CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CNY', 'HKD', 'CHF', 'CAD', 'AUD', 'NZD', 'SGD', 'KRW', 'INR', 'TWD', 'THB', 'MYR', 'IDR', 'PHP', 'VND', 'AED', 'SAR', 'ZAR', 'BRL', 'MXN', 'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'HUF', 'TRY', 'RUB', 'ILS'];
 const COUNTRIES = ['United Kingdom', 'United States', 'China', 'Hong Kong', 'Japan', 'Singapore', 'South Korea', 'Taiwan', 'India', 'Australia', 'New Zealand', 'Canada', 'Germany', 'France', 'Switzerland', 'Netherlands', 'Ireland', 'Spain', 'Italy', 'Sweden', 'Norway', 'Denmark', 'Poland', 'United Arab Emirates', 'Saudi Arabia', 'South Africa', 'Brazil', 'Mexico', 'Other'];
-const COUNTRY_FLAGS = { CN: '🇨🇳', UK: '🇬🇧', US: '🇺🇸', Other: '🏳️' };
+const COUNTRY_FLAGS = {
+  'China': '🇨🇳', 'United Kingdom': '🇬🇧', 'United States': '🇺🇸', 'Hong Kong': '🇭🇰',
+  'Japan': '🇯🇵', 'Singapore': '🇸🇬', 'South Korea': '🇰🇷', 'Taiwan': '🇹🇼', 'India': '🇮🇳',
+  'Australia': '🇦🇺', 'New Zealand': '🇳🇿', 'Canada': '🇨🇦', 'Germany': '🇩🇪', 'France': '🇫🇷',
+  'Switzerland': '🇨🇭', 'Netherlands': '🇳🇱', 'Ireland': '🇮🇪', 'Spain': '🇪🇸', 'Italy': '🇮🇹',
+  'Sweden': '🇸🇪', 'Norway': '🇳🇴', 'Denmark': '🇩🇰', 'Poland': '🇵🇱',
+  'United Arab Emirates': '🇦🇪', 'Saudi Arabia': '🇸🇦', 'South Africa': '🇿🇦',
+  'Brazil': '🇧🇷', 'Mexico': '🇲🇽', 'Other': '🏳️',
+};
 
 // ---------- formatting helpers ----------
 const fmtMoney = (n, cur = 'USD') =>
@@ -73,12 +100,14 @@ function accountTypeLabel(a) {
 }
 
 // Type-to-filter select: shows options, filters as you type, click or Enter to pick.
-function SearchSelect({ value, onChange, options, placeholder }) {
+function SearchSelect({ value, onChange, options, placeholder, allowCustom }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const shown = open && query
     ? options.filter((o) => o.toLowerCase().includes(query.toLowerCase()))
     : options;
+  const exactMatch = options.some((o) => o.toLowerCase() === query.trim().toLowerCase());
+  const commit = (v) => { onChange(v); setOpen(false); setQuery(''); };
   return (
     <div style={{ position: 'relative' }}>
       <input
@@ -86,13 +115,22 @@ function SearchSelect({ value, onChange, options, placeholder }) {
         placeholder={placeholder || value}
         onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
         onFocus={() => { setQuery(''); setOpen(true); }}
-        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onBlur={() => setTimeout(() => {
+          // For free-text fields, keep whatever was typed if it's non-empty.
+          if (allowCustom && query.trim()) onChange(query.trim());
+          setOpen(false);
+        }, 150)}
         autoComplete="off"
       />
-      {open && shown.length > 0 && (
+      {open && (shown.length > 0 || (allowCustom && query.trim() && !exactMatch)) && (
         <ul className="autocomplete">
+          {allowCustom && query.trim() && !exactMatch && (
+            <li onMouseDown={() => commit(query.trim())}>
+              <span className="ac-symbol">Use “{query.trim()}”</span>
+            </li>
+          )}
           {shown.map((o) => (
-            <li key={o} onMouseDown={() => { onChange(o); setOpen(false); setQuery(''); }}>
+            <li key={o} onMouseDown={() => commit(o)}>
               <span className="ac-symbol">{o}</span>
             </li>
           ))}
@@ -112,8 +150,8 @@ export default function App() {
   const [txHolding, setTxHolding] = useState(null); // holding object for drawer
   const [pnlMode, setPnlMode] = useState('money'); // money | pct — toggled in the table header
 
-  const loadPortfolio = useCallback(async () => {
-    setLoading(true);
+  const loadPortfolio = useCallback(async (isRefresh) => {
+    if (!isRefresh) setLoading(true);
     try {
       const [h, s] = await Promise.all([
         axios.get(`${API}/holdings`),
@@ -133,7 +171,10 @@ export default function App() {
   const deleteHolding = async (id) => {
     if (!window.confirm('Delete this holding and all its transactions and memo?')) return;
     await axios.delete(`${API}/holdings/${id}`);
-    loadPortfolio();
+    // Remove the row immediately for an instant feel, then reconcile totals in the
+    // background (the refetch re-prices every holding and can take a second or two).
+    setHoldings((prev) => prev.filter((h) => h.id !== id));
+    loadPortfolio(true);
   };
 
   return (
@@ -153,6 +194,7 @@ export default function App() {
             onMemo={(h) => setView({ name: 'memo', holding: h })}
             onTx={(h) => setTxHolding(h)}
             onDelete={deleteHolding}
+            onSynced={() => loadPortfolio(true)}
           />
         )}
 
@@ -164,19 +206,21 @@ export default function App() {
         )}
 
         {tab === 'banking' && <CashTab />}
+
+        {tab === 'journal' && <Journal onOpen={(h) => { setTab('investing'); setView({ name: 'memo', holding: h }); }} />}
       </main>
 
       {showAdd && (
         <AddPositionModal
           onClose={() => setShowAdd(false)}
-          onSaved={() => { setShowAdd(false); loadPortfolio(); }}
+          onSaved={() => { setShowAdd(false); loadPortfolio(true); }}
         />
       )}
 
       {txHolding && (
         <TransactionsDrawer
           holding={txHolding}
-          onClose={() => { setTxHolding(null); loadPortfolio(); }}
+          onClose={() => { setTxHolding(null); loadPortfolio(true); }}
         />
       )}
     </>
@@ -194,6 +238,7 @@ function Overview() {
   const [base, setBase] = useState('GBP');
   const [alloc, setAlloc] = useState(null);
   const [series, setSeries] = useState(null);
+  const [windowStart, setWindowStart] = useState(null);
   const [loadingSeries, setLoadingSeries] = useState(true);
 
   useEffect(() => {
@@ -203,7 +248,7 @@ function Overview() {
   useEffect(() => {
     setLoadingSeries(true);
     axios.get(`${API}/overview/timeseries?period=${period}`)
-      .then((r) => setSeries(r.data.points || []))
+      .then((r) => { setSeries(r.data.points || []); setWindowStart(r.data.window_start || null); })
       .catch(() => setSeries([]))
       .finally(() => setLoadingSeries(false));
   }, [period]);
@@ -216,6 +261,9 @@ function Overview() {
     : [];
   const hasPie = pieData.length > 0;
   const hasSeries = series && series.length > 1;
+  // The reconstruction only reaches back to the earliest transaction. If that's later
+  // than the requested window start, the chart is shorter than the period — say so.
+  const shortHistory = hasSeries && windowStart && series[0].date > windowStart;
 
   // Performance = % return vs the first point in the window (rebased to 0).
   const chartData = (series || []).map((p) => ({
@@ -283,20 +331,27 @@ function Overview() {
             <div className="pie-wrap">
               <ResponsiveContainer width="100%" height={280}>
                 <PieChart>
-                  <Pie data={pieData} dataKey="value" nameKey="label" cx="50%" cy="50%" outerRadius={100} innerRadius={55}>
+                  <Pie data={pieData} dataKey="value" nameKey="label" cx="50%" cy="50%" outerRadius={100} innerRadius={55}
+                    label={({ percent }) => percent >= 0.04 ? `${(percent * 100).toFixed(0)}%` : ''}
+                    labelLine={false}
+                    style={{ fontFamily: 'DM Mono, monospace', fontSize: 11 }}>
                     {pieData.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
                   </Pie>
                   <Tooltip formatter={(v, n) => [fmtBase(v), n]} />
                 </PieChart>
               </ResponsiveContainer>
               <div className="pie-legend">
-                {pieData.map((s, i) => (
-                  <div className="legend-row" key={s.label}>
-                    <span className="legend-dot" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
-                    <span className="legend-label">{s.label}</span>
-                    <span className="legend-val">{fmtBase(s.value)}</span>
-                  </div>
-                ))}
+                {(() => {
+                  const total = pieData.reduce((s, x) => s + x.value, 0);
+                  return pieData.map((s, i) => (
+                    <div className="legend-row" key={s.label}>
+                      <span className="legend-dot" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
+                      <span className="legend-label">{s.label}</span>
+                      <span className="legend-pct">{total > 0 ? `${((s.value / total) * 100).toFixed(1)}%` : ''}</span>
+                      <span className="legend-val">{fmtBase(s.value)}</span>
+                    </div>
+                  ));
+                })()}
               </div>
             </div>
           )}
@@ -335,9 +390,214 @@ function Overview() {
               </LineChart>
             </ResponsiveContainer>
           )}
+          {shortHistory && (
+            <p className="ov-note">Only {series.length} days available — your earliest transaction is {series[0].date}, so there's no portfolio history before then for this period. Rebuild a position from its broker trade history (Investing → Import) to extend it.</p>
+          )}
         </div>
       </div>
     </>
+  );
+}
+
+// ============================ JOURNAL ============================
+// Download a text/markdown file (the journal export).
+function downloadText(filename, text) {
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
+// Build a Markdown investment journal from the /api/journal rows — formatted to hand
+// to an AI for analysis.
+function journalMarkdown(rows) {
+  const money = (n, c = 'USD') => (n == null ? '—'
+    : new Intl.NumberFormat('en-US', { style: 'currency', currency: c, maximumFractionDigits: 2 }).format(n));
+  const open = rows.filter((r) => r.is_open);
+  const closed = rows.filter((r) => !r.is_open);
+  const lines = ['# Financier — Investment Journal', '', `_Exported ${new Date().toISOString().slice(0, 10)}._`, ''];
+  const section = (title, list) => {
+    lines.push(`## ${title}`, '');
+    if (!list.length) { lines.push('_None._', ''); return; }
+    for (const r of list) {
+      const cur = r.currency || 'USD';
+      lines.push(`### ${r.ticker}${r.name ? ` — ${r.name}` : ''}${r.sector ? ` · ${r.sector}` : ''}`);
+      if (r.thesis) lines.push(`- **Thesis:** ${r.thesis}`);
+      if (r.strategy) lines.push(`- **Strategy:** ${r.strategy}`);
+      if (r.conviction != null) lines.push(`- **Conviction:** ${r.conviction}/5${r.time_horizon ? ` · Horizon: ${r.time_horizon}` : ''}`);
+      lines.push(`- **Entry:** ${r.entry_date || '—'} @ ${money(r.avg_cost, cur)}${r.total_shares ? ` · ${r.total_shares} shares` : ''}`);
+      if (r.catalysts) lines.push(`- **Catalysts:** ${r.catalysts}`);
+      if (r.risk_factors) lines.push(`- **Risks:** ${r.risk_factors}`);
+      if (r.target_price != null || r.stop_loss != null) lines.push(`- **Target / Stop:** ${money(r.target_price, cur)} / ${money(r.stop_loss, cur)}`);
+      if (r.is_open) {
+        lines.push(`- **Status:** Open${r.current_price != null ? ` · now ${money(r.current_price, cur)}` : ''}${r.unrealized_pnl != null ? ` · unrealized ${money(r.unrealized_pnl, cur)}` : ''}`);
+      } else {
+        lines.push(`- **Exit:** ${r.exit_date || r.last_sell_date || '—'}${r.exit_price != null ? ` @ ${money(r.exit_price, cur)}` : ''} · reason: ${r.exit_reason || '—'}`);
+        lines.push(`- **Realized P&L:** ${money(r.realized_pnl, cur)}`);
+        if (r.post_mortem) lines.push(`- **Post-mortem:** ${r.post_mortem}`);
+      }
+      if (r.thesis_history && r.thesis_history.length > 1) {
+        lines.push('- **Thesis evolution:**');
+        for (const th of r.thesis_history) lines.push(`  - ${(th.logged_at || '').slice(0, 10)}: ${th.thesis}`);
+      }
+      lines.push('');
+    }
+  };
+  section('Open positions', open);
+  section('Closed positions', closed);
+  return lines.join('\n');
+}
+
+// Minimal markdown renderer for the AI analysis (## headings, - bullets, **bold**).
+function MarkdownLite({ text }) {
+  const inline = (s) => s.split(/(\*\*[^*]+\*\*)/g).map((part, i) =>
+    (part.startsWith('**') && part.endsWith('**'))
+      ? <strong key={i}>{part.slice(2, -2)}</strong>
+      : <span key={i}>{part}</span>);
+  const out = []; let bullets = null;
+  const flush = (key) => { if (bullets) { out.push(<ul key={`u${key}`}>{bullets}</ul>); bullets = null; } };
+  (text || '').split('\n').forEach((ln, i) => {
+    const t = ln.trim();
+    if (t.startsWith('### ')) { flush(i); out.push(<h4 key={i} className="md-h">{inline(t.slice(4))}</h4>); }
+    else if (t.startsWith('## ')) { flush(i); out.push(<h4 key={i} className="md-h">{inline(t.slice(3))}</h4>); }
+    else if (t.startsWith('- ') || t.startsWith('* ')) { (bullets || (bullets = [])).push(<li key={i}>{inline(t.slice(2))}</li>); }
+    else if (t === '') { flush(i); }
+    else { flush(i); out.push(<p key={i} className="md-p">{inline(t)}</p>); }
+  });
+  flush('end');
+  return <div className="md">{out}</div>;
+}
+
+function Journal({ onOpen }) {
+  const [rows, setRows] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const [aiKey, setAiKey] = useState(() => localStorage.getItem('financier.anthropic.key') || '');
+  const [keyOpen, setKeyOpen] = useState(false);
+  const [review, setReview] = useState(null);          // { mode, model, text } | { error }
+  const [reviewLoading, setReviewLoading] = useState(false);
+  useEffect(() => { axios.get(`${API}/journal`).then((r) => setRows(r.data)).catch(() => setRows([])); }, []);
+  if (rows == null) return <div className="loading">Loading journal…</div>;
+  const open = rows.filter((r) => r.is_open);
+  const closed = rows.filter((r) => !r.is_open);
+
+  const runAnalysis = async (mode) => {
+    setReview(null); setReviewLoading(true);
+    try {
+      const r = await axios.post(`${API}/journal/review`, { mode, api_key: aiKey.trim() || undefined }, { timeout: 135000 });
+      if (r.data.error === 'no_key') { setKeyOpen(true); setReview({ error: 'Add your Anthropic API key to run the analysis — it stays on this machine.' }); }
+      else setReview({ mode, model: r.data.model, text: r.data.review });
+    } catch (e) {
+      setReview({ error: e.response?.data?.error || 'Analysis failed — is the backend running (and your VPN on, in China)?' });
+    } finally { setReviewLoading(false); }
+  };
+  const saveKey = () => { localStorage.setItem('financier.anthropic.key', aiKey.trim()); setKeyOpen(false); };
+  const copyJson = async () => {
+    try { const r = await axios.get(`${API}/journal/payload`); await navigator.clipboard.writeText(JSON.stringify(r.data, null, 2)); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* blocked */ }
+  };
+  const downloadJson = async () => {
+    const r = await axios.get(`${API}/journal/payload`);
+    downloadText(`financier-journal-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(r.data, null, 2));
+  };
+
+  return (
+    <>
+      <div className="section-head">
+        <div className="section-titles">
+          <h2>Journal</h2>
+          <div className="subnav"><span className="mono">{open.length} open · {closed.length} closed · click a card to open it</span></div>
+        </div>
+        {rows.length > 0 && (
+          <div className="head-actions">
+            <button className="btn-primary" onClick={() => runAnalysis('review')} disabled={reviewLoading}>{reviewLoading ? 'Analysing…' : 'Review decisions (AI)'}</button>
+            <button className="csv-btn" onClick={() => runAnalysis('style')} disabled={reviewLoading}>Style profile (AI)</button>
+            <button className="csv-btn" onClick={copyJson}>{copied ? 'Copied ✓' : 'Copy data (JSON)'}</button>
+            <button className="csv-btn" onClick={downloadJson}>Download JSON</button>
+            <button className="csv-btn" onClick={() => setKeyOpen((o) => !o)} title="Set Anthropic API key">{aiKey ? 'AI key ✓' : 'Set AI key'}</button>
+          </div>
+        )}
+      </div>
+
+      {keyOpen && (
+        <div className="key-row">
+          <input type="password" value={aiKey} onChange={(e) => setAiKey(e.target.value)} placeholder="Anthropic API key (sk-ant-…) — stored locally on this device" />
+          <button className="btn-primary" onClick={saveKey}>Save</button>
+        </div>
+      )}
+      {reviewLoading && <div className="ai-box"><span className="mono">AI analysis · claude-opus-4-8</span>Reading your decisions and reasoning…</div>}
+      {review && review.error && <div className="ai-box warn"><span className="mono">AI analysis</span>{review.error}</div>}
+      {review && review.text && (
+        <div className="ai-box">
+          <span className="mono">{review.mode === 'style' ? 'Style profile' : 'Decision review'} · {review.model}</span>
+          <MarkdownLite text={review.text} />
+        </div>
+      )}
+
+      {rows.length === 0 ? (
+        <div className="empty">No positions yet. Your theses and exits will appear here as a diary.</div>
+      ) : (
+        <>
+          <JournalSection title="Open" list={open} onOpen={onOpen} />
+          <JournalSection title="Closed" list={closed} onOpen={onOpen} />
+        </>
+      )}
+    </>
+  );
+}
+function JournalSection({ title, list, onOpen }) {
+  if (!list.length) return null;
+  return (
+    <div className="journal-section">
+      <div className="divider-label">{title}</div>
+      {list.map((r) => <JournalCard key={r.id} r={r} onOpen={onOpen} />)}
+    </div>
+  );
+}
+function JournalCard({ r, onOpen }) {
+  const [showHist, setShowHist] = useState(false);
+  const cur = r.currency || 'USD';
+  return (
+    <div className="journal-card clickable" onClick={() => onOpen && onOpen({ id: r.id, ticker: r.ticker, asset_type: r.asset_type })}>
+      <div className="jc-head">
+        <span className="ticker">{r.ticker}</span>
+        {r.name && <span className="jc-name">{r.name}</span>}
+        {r.sector && <span className="sector-tag">{r.sector}</span>}
+        <span className={`jc-status ${r.is_open ? 'open' : 'closed'}`}>{r.is_open ? 'open' : 'closed'}</span>
+        <span className="jc-pnl">
+          {r.is_open
+            ? (r.unrealized_pnl != null && <span className={pnlClass(r.unrealized_pnl)}>{fmtMoney(r.unrealized_pnl, cur)} unreal.</span>)
+            : <span className={pnlClass(r.realized_pnl)}>{fmtMoney(r.realized_pnl, cur)} real.</span>}
+        </span>
+      </div>
+      {r.thesis && <p className="jc-thesis">{r.thesis}</p>}
+      <div className="jc-meta">
+        {r.strategy && <span>{r.strategy}</span>}
+        <span>Entry {r.entry_date || '—'} @ {fmtMoney(r.avg_cost, cur)}</span>
+        {!r.is_open && <span>Exit {r.exit_date || r.last_sell_date || '—'} · {r.exit_reason || 'no reason logged'}</span>}
+        {r.conviction != null && <span>Conviction {r.conviction}/5</span>}
+        {r.time_horizon && <span>{r.time_horizon}</span>}
+      </div>
+      {!r.is_open && r.post_mortem && (
+        <p className="jc-postmortem"><span className="mono">Post-mortem</span>{r.post_mortem}</p>
+      )}
+      {r.thesis_history && r.thesis_history.length > 1 && (
+        <>
+          <button className="link-btn" onClick={(e) => { e.stopPropagation(); setShowHist((s) => !s); }}>
+            {showHist ? 'hide' : 'show'} thesis history ({r.thesis_history.length})
+          </button>
+          {showHist && (
+            <div className="thesis-history">
+              {[...r.thesis_history].reverse().map((th, i) => (
+                <div className="thesis-entry" key={i}>
+                  <div className="thesis-entry-meta"><span className="tx-date">{(th.logged_at || '').slice(0, 10)}</span></div>
+                  <div className="thesis-entry-text">{th.thesis}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -385,7 +645,7 @@ function Header({ summary, tab, setTab }) {
   return (
     <header className="app-header">
       <div className="header-top">
-        <div className="logo"><span className="logo-mark" aria-hidden="true"></span>Financier</div>
+        <div className="logo"><span className="logo-mark" aria-hidden="true"></span>Financier<span className="app-version">v{APP_VERSION}</span></div>
         <div className="header-right">
           <div className="data-actions">
             <button className="data-btn" onClick={doExport} title="Download a JSON backup of all your data">Export</button>
@@ -398,6 +658,7 @@ function Header({ summary, tab, setTab }) {
             <button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>Overview</button>
             <button className={tab === 'investing' ? 'active' : ''} onClick={() => setTab('investing')}>Investing</button>
             <button className={tab === 'banking' ? 'active' : ''} onClick={() => setTab('banking')}>Banking</button>
+            <button className={tab === 'journal' ? 'active' : ''} onClick={() => setTab('journal')}>Journal</button>
           </nav>
         </div>
       </div>
@@ -425,9 +686,11 @@ function SummaryItem({ label, value, cls = '' }) {
 }
 
 // ============================ PORTFOLIO (Investing → Stocks) ============================
-function Portfolio({ holdings, loading, pnlMode, onTogglePnl, onAdd, onMemo, onTx, onDelete }) {
+function Portfolio({ holdings, loading, pnlMode, onTogglePnl, onAdd, onMemo, onTx, onDelete, onSynced }) {
   const pnlHeader = pnlMode === 'money' ? 'P&L $' : 'P&L %';
   const [invSub, setInvSub] = useState('stocks'); // stocks | bonds
+  const [showIbkr, setShowIbkr] = useState(false);
+  const [showT212, setShowT212] = useState(false);
   const [sortKey, setSortKey] = useState('ticker');
   const [sortDir, setSortDir] = useState('asc');
   const [typeFilter, setTypeFilter] = useState('all'); // all | stock | etf
@@ -474,7 +737,13 @@ function Portfolio({ holdings, loading, pnlMode, onTogglePnl, onAdd, onMemo, onT
             <button className="subnav-item soon" disabled>Polymarket</button>
           </div>
         </div>
-        {invSub === 'stocks' && <button className="btn-primary" onClick={onAdd}>+ Add stock position</button>}
+        {invSub === 'stocks' && (
+          <div className="head-actions">
+            <button className="csv-btn" onClick={() => setShowIbkr(true)}>Import from IBKR</button>
+            <button className="csv-btn" onClick={() => setShowT212(true)}>Import from Trading212</button>
+            <button className="btn-primary" onClick={onAdd}>+ Add stock position</button>
+          </div>
+        )}
       </div>
 
       {invSub === 'bonds' ? <BondsView /> : (
@@ -570,7 +839,394 @@ function Portfolio({ holdings, loading, pnlMode, onTogglePnl, onAdd, onMemo, onT
       )}
       </>
       )}
+      {showIbkr && <IbkrModal onClose={() => setShowIbkr(false)} onSynced={() => { setShowIbkr(false); onSynced(); }} />}
+      {showT212 && <T212Modal onClose={() => setShowT212(false)} onSynced={() => { setShowT212(false); onSynced(); }} />}
     </>
+  );
+}
+
+// ============================ IBKR IMPORT ============================
+function IbkrModal({ onClose, onSynced }) {
+  // Remember the Flex token + Query ID locally — this is a private single-user app on
+  // your own machine, so there's no need to re-type them every import.
+  const [token, setToken] = useState(() => localStorage.getItem('financier.ibkr.token') || '');
+  const [queryId, setQueryId] = useState(() => localStorage.getItem('financier.ibkr.queryId') || '');
+  // Saved credential profiles, one per IBKR account (so several accounts are a dropdown).
+  const [accounts, setAccounts] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('financier.ibkr.accounts') || '[]'); } catch { return []; }
+  });
+  const [loading, setLoading] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [rows, setRows] = useState([]); // per-position { selected, ticker, thesis, ...p }
+  const [err, setErr] = useState('');
+  const [warn, setWarn] = useState('');
+  const [result, setResult] = useState(null);
+
+  const doPreview = async () => {
+    setErr(''); setWarn(''); setResult(null); setLoading(true);
+    try {
+      const r = await axios.post(`${API}/ibkr/preview`, { token: token.trim(), query_id: queryId.trim() }, { timeout: 60000 });
+      // Persist the credentials once they've successfully fetched a statement.
+      localStorage.setItem('financier.ibkr.token', token.trim());
+      localStorage.setItem('financier.ibkr.queryId', queryId.trim());
+      // Save/refresh this account in the saved-accounts list (labelled by IBKR account id).
+      const acctId = r.data.account_id || `…${token.trim().slice(-4)}`;
+      setAccounts((prev) => {
+        const next = [...prev.filter((a) => a.id !== acctId), { id: acctId, token: token.trim(), queryId: queryId.trim() }];
+        localStorage.setItem('financier.ibkr.accounts', JSON.stringify(next));
+        return next;
+      });
+      // Seed editable rows. The Yahoo ticker defaults to the backend's exchange-based
+      // guess, overridden by any correction you've made before (remembered per symbol).
+      const map = JSON.parse(localStorage.getItem('financier.ibkr.map') || '{}');
+      setRows(r.data.positions.map((p) => ({
+        ...p,
+        ticker: (map[p.symbol.toUpperCase()] || p.yahoo_symbol || p.symbol).toUpperCase(),
+        thesis: '',
+        selected: !!p.is_new,
+      })));
+      setPreview(r.data);
+    } catch (e) {
+      setErr(e.response?.data?.error || 'Could not reach IBKR. Check your token and query ID.');
+    } finally { setLoading(false); }
+  };
+
+  const updateRow = (i, patch) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const chosen = rows.filter((r) => r.selected);
+  const newChosen = chosen.filter((r) => r.is_new);
+  // New rows need a ticker + thesis; already-held rows are just a history rebuild.
+  const canImport = chosen.length > 0 && newChosen.every((r) => r.ticker.trim() && r.thesis.trim());
+
+  const doImport = async (skipVerify) => {
+    setErr(''); setWarn('');
+    // Remember any ticker corrections so the next import pre-fills them.
+    const map = JSON.parse(localStorage.getItem('financier.ibkr.map') || '{}');
+    newChosen.forEach((r) => { map[r.symbol.toUpperCase()] = r.ticker.trim().toUpperCase(); });
+    localStorage.setItem('financier.ibkr.map', JSON.stringify(map));
+
+    // Verify each NEW ticker resolves to a Yahoo price; warn (don't block) if some don't.
+    if (!skipVerify) {
+      setLoading(true);
+      const bad = [];
+      for (const r of newChosen) {
+        try { await axios.get(`${API}/price/${encodeURIComponent(r.ticker.trim().toUpperCase())}`); }
+        catch { bad.push(r.ticker.trim().toUpperCase()); }
+      }
+      setLoading(false);
+      if (bad.length) {
+        setWarn(`No Yahoo price for: ${bad.join(', ')}. Non-US listings need an exchange suffix (e.g. 2DG.MU, EQQQ.L). Fix the ticker, or import anyway.`);
+        return;
+      }
+    }
+
+    setLoading(true);
+    try {
+      const selections = chosen.map((r) => ({ symbol: r.symbol, ticker: r.ticker.trim().toUpperCase(), thesis: r.thesis.trim() }));
+      const r = await axios.post(`${API}/ibkr/sync`, { token: token.trim(), query_id: queryId.trim(), selections }, { timeout: 60000 });
+      setResult(r.data);
+    } catch (e) {
+      setErr(e.response?.data?.error || 'Import failed.');
+    } finally { setLoading(false); }
+  };
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal modal-ibkr" onClick={(e) => e.stopPropagation()}>
+        <h3>Import from IBKR</h3>
+        <p className="sub">Uses IBKR's Flex Web Service. Preview your positions, pick which to import, and write a one-line thesis for each. Nothing existing is overwritten.</p>
+
+        {!result && (
+          <>
+            {accounts.length > 0 && (
+              <div className="field">
+                <label>Account</label>
+                <select
+                  value={accounts.find((a) => a.token === token && a.queryId === queryId)?.id || ''}
+                  onChange={(e) => {
+                    const a = accounts.find((x) => x.id === e.target.value);
+                    if (a) { setToken(a.token); setQueryId(a.queryId); } else { setToken(''); setQueryId(''); }
+                    setPreview(null); setRows([]); setErr(''); setWarn('');
+                  }}>
+                  {accounts.map((a) => <option key={a.id} value={a.id}>{a.id}</option>)}
+                  <option value="">+ New account…</option>
+                </select>
+              </div>
+            )}
+            <div className="field">
+              <label>Flex token</label>
+              <input value={token} onChange={(e) => setToken(e.target.value)} placeholder="from IBKR → Reports → Flex Web Service" />
+            </div>
+            <div className="field">
+              <label>Query ID</label>
+              <input value={queryId} onChange={(e) => setQueryId(e.target.value)} placeholder="the Activity Flex Query ID" />
+            </div>
+          </>
+        )}
+
+        {err && <div className="error-msg">{err}</div>}
+
+        {preview && !result && (
+          <div className="ibkr-preview">
+            <div className="divider-label">{preview.count} positions · {rows.filter((r) => r.is_new).length} new · choose what to import</div>
+            <div className="table-wrap" style={{ maxHeight: 340, overflow: 'auto' }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th></th>
+                    <th className="left">IBKR</th>
+                    <th className="left">Ticker (Yahoo)</th>
+                    <th className="left">Thesis <span className="req-star">*</span></th>
+                    <th>Qty</th>
+                    <th>Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r, i) => (
+                    <tr key={r.symbol} style={{ opacity: r.is_new || r.selected ? 1 : 0.55 }}>
+                      <td>
+                        <input type="checkbox" checked={r.selected}
+                          onChange={(e) => updateRow(i, { selected: e.target.checked })} />
+                      </td>
+                      <td className="left">
+                        <span className="ticker" style={{ fontSize: '0.82rem' }}>{r.symbol}</span>
+                        {r.listing_exchange && <span className="acct-ref">{r.listing_exchange}</span>}
+                      </td>
+                      <td className="left">
+                        {r.is_new ? (
+                          <>
+                            <input value={r.ticker} list={`sfx-${i}`}
+                              onChange={(e) => updateRow(i, { ticker: e.target.value.toUpperCase() })} />
+                            <datalist id={`sfx-${i}`}>
+                              {YAHOO_SUFFIXES.map((s) => <option key={s} value={`${r.symbol.toUpperCase()}${s}`} />)}
+                            </datalist>
+                          </>
+                        ) : <span className="muted-hint">{r.ticker}</span>}
+                      </td>
+                      <td className="left">
+                        {r.is_new
+                          ? <input value={r.thesis} placeholder="one line — required" disabled={!r.selected}
+                              onChange={(e) => updateRow(i, { thesis: e.target.value })} />
+                          : <span className="muted-hint">{r.selected ? 'rebuild trades' : 'held'}</span>}
+                      </td>
+                      <td className="num">{r.quantity}</td>
+                      <td className="num">{r.cost_price != null ? r.cost_price : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="ov-note">Non-US tickers need a Yahoo suffix (e.g. 2DG.MU, EQQQ.L) — the guess comes from the IBKR listing exchange, and your fix is remembered. Tick an already-held position to rebuild its transaction history from IBKR trades.</p>
+          </div>
+        )}
+
+        {result && (
+          <div className="ibkr-result">
+            <div className="divider-label">Done</div>
+            <p>
+              Added <strong>{result.added}</strong> position{result.added === 1 ? '' : 's'}
+              {result.resynced ? `, rebuilt ${result.resynced} from trades` : ''}.
+              {result.skipped?.length ? ` Skipped ${result.skipped.length}.` : ''}
+            </p>
+            {result.errors?.length > 0 && <p className="error-msg">{result.errors.join(' · ')}</p>}
+            <p className="ov-note">Each buy/sell is built from your IBKR trade history. Shares bought before the query window show as one "opening" entry at average cost.</p>
+          </div>
+        )}
+
+        {warn && (
+          <div className="warn-msg">
+            <p>{warn}</p>
+            <div className="warn-actions">
+              <button className="btn-ghost" onClick={() => setWarn('')}>Go back &amp; fix</button>
+              <button className="btn-warn" onClick={() => doImport(true)} disabled={loading}>Import anyway</button>
+            </div>
+          </div>
+        )}
+
+        <div className="modal-actions">
+          {!result && <button className="btn-ghost" onClick={onClose}>Cancel</button>}
+          {!preview && !result && <button className="btn-primary" onClick={doPreview} disabled={loading || !token.trim() || !queryId.trim()}>{loading ? 'Fetching…' : 'Preview'}</button>}
+          {preview && !result && <button className="btn-primary" onClick={() => doImport(false)} disabled={loading || !canImport}>{loading ? 'Working…' : `Import ${chosen.length} selected`}</button>}
+          {result && <button className="btn-primary" onClick={onSynced}>Done</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================ TRADING212 IMPORT ============================
+function T212Modal({ onClose, onSynced }) {
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('financier.t212.apiKey') || '');
+  const [env, setEnv] = useState(() => localStorage.getItem('financier.t212.env') || 'live');
+  const [loading, setLoading] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [rows, setRows] = useState([]);
+  const [err, setErr] = useState('');
+  const [warn, setWarn] = useState('');
+  const [result, setResult] = useState(null);
+
+  const doPreview = async () => {
+    setErr(''); setWarn(''); setResult(null); setLoading(true);
+    try {
+      const r = await axios.post(`${API}/t212/preview`, { api_key: apiKey.trim(), environment: env }, { timeout: 60000 });
+      localStorage.setItem('financier.t212.apiKey', apiKey.trim());
+      localStorage.setItem('financier.t212.env', env);
+      const map = JSON.parse(localStorage.getItem('financier.t212.map') || '{}');
+      setRows(r.data.positions.map((p) => ({
+        ...p,
+        ticker: (map[p.symbol.toUpperCase()] || p.yahoo_symbol || p.symbol).toUpperCase(),
+        thesis: '',
+        selected: !!p.is_new,
+      })));
+      setPreview(r.data);
+    } catch (e) {
+      setErr(e.response?.data?.error || 'Could not reach Trading212. Check your API key and account type.');
+    } finally { setLoading(false); }
+  };
+
+  const updateRow = (i, patch) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const chosen = rows.filter((r) => r.selected);
+  const newChosen = chosen.filter((r) => r.is_new);
+  const canImport = chosen.length > 0 && newChosen.every((r) => r.ticker.trim() && r.thesis.trim());
+
+  const doImport = async (skipVerify) => {
+    setErr(''); setWarn('');
+    const map = JSON.parse(localStorage.getItem('financier.t212.map') || '{}');
+    newChosen.forEach((r) => { map[r.symbol.toUpperCase()] = r.ticker.trim().toUpperCase(); });
+    localStorage.setItem('financier.t212.map', JSON.stringify(map));
+
+    if (!skipVerify) {
+      setLoading(true);
+      const bad = [];
+      for (const r of newChosen) {
+        try { await axios.get(`${API}/price/${encodeURIComponent(r.ticker.trim().toUpperCase())}`); }
+        catch { bad.push(r.ticker.trim().toUpperCase()); }
+      }
+      setLoading(false);
+      if (bad.length) {
+        setWarn(`No Yahoo price for: ${bad.join(', ')}. Non-US listings need an exchange suffix (e.g. VUSA.L). Fix the ticker, or import anyway.`);
+        return;
+      }
+    }
+
+    setLoading(true);
+    try {
+      const selections = chosen.map((r) => ({ symbol: r.symbol, ticker: r.ticker.trim().toUpperCase(), thesis: r.thesis.trim() }));
+      const r = await axios.post(`${API}/t212/sync`, { api_key: apiKey.trim(), environment: env, selections }, { timeout: 60000 });
+      setResult(r.data);
+    } catch (e) {
+      setErr(e.response?.data?.error || 'Import failed.');
+    } finally { setLoading(false); }
+  };
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal modal-ibkr" onClick={(e) => e.stopPropagation()}>
+        <h3>Import from Trading212</h3>
+        <p className="sub">Uses your Trading212 API key (read-only). Preview your positions, pick which to import, and write a one-line thesis for each. Nothing existing is overwritten.</p>
+
+        {!result && (
+          <>
+            <div className="field">
+              <label>Account</label>
+              <select value={env} onChange={(e) => { setEnv(e.target.value); setPreview(null); setRows([]); }}>
+                <option value="live">Live (real money)</option>
+                <option value="demo">Practice</option>
+              </select>
+            </div>
+            <div className="field">
+              <label>API key</label>
+              <input value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="from Trading212 → Settings → API (Beta)" />
+            </div>
+          </>
+        )}
+
+        {err && <div className="error-msg">{err}</div>}
+
+        {preview && !result && (
+          <div className="ibkr-preview">
+            <div className="divider-label">{preview.count} positions · {rows.filter((r) => r.is_new).length} new · choose what to import</div>
+            <div className="table-wrap" style={{ maxHeight: 340, overflow: 'auto' }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th></th>
+                    <th className="left">T212</th>
+                    <th className="left">Ticker (Yahoo)</th>
+                    <th className="left">Thesis <span className="req-star">*</span></th>
+                    <th>Qty</th>
+                    <th>Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r, i) => (
+                    <tr key={r.symbol} style={{ opacity: r.is_new || r.selected ? 1 : 0.55 }}>
+                      <td>
+                        <input type="checkbox" checked={r.selected}
+                          onChange={(e) => updateRow(i, { selected: e.target.checked })} />
+                      </td>
+                      <td className="left">
+                        <span className="ticker" style={{ fontSize: '0.82rem' }}>{r.symbol}</span>
+                        {r.name && <span className="acct-ref">{r.name}</span>}
+                      </td>
+                      <td className="left">
+                        {r.is_new ? (
+                          <>
+                            <input value={r.ticker} list={`t212sfx-${i}`}
+                              onChange={(e) => updateRow(i, { ticker: e.target.value.toUpperCase() })} />
+                            <datalist id={`t212sfx-${i}`}>
+                              {YAHOO_SUFFIXES.map((s) => <option key={s} value={`${r.symbol.toUpperCase()}${s}`} />)}
+                            </datalist>
+                          </>
+                        ) : <span className="muted-hint">{r.ticker}</span>}
+                      </td>
+                      <td className="left">
+                        {r.is_new
+                          ? <input value={r.thesis} placeholder="one line — required" disabled={!r.selected}
+                              onChange={(e) => updateRow(i, { thesis: e.target.value })} />
+                          : <span className="muted-hint">{r.selected ? 'rebuild' : 'held'}</span>}
+                      </td>
+                      <td className="num">{r.quantity}</td>
+                      <td className="num">{r.cost_price != null ? r.cost_price : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="ov-note">Non-US tickers need a Yahoo suffix (e.g. VUSA.L) — the guess comes from the position's currency, so correct it if needed and your fix is remembered. Tick an already-held position to rebuild it from Trading212.</p>
+          </div>
+        )}
+
+        {result && (
+          <div className="ibkr-result">
+            <div className="divider-label">Done</div>
+            <p>
+              Added <strong>{result.added}</strong> position{result.added === 1 ? '' : 's'}
+              {result.resynced ? `, rebuilt ${result.resynced}` : ''}.
+              {result.skipped?.length ? ` Skipped ${result.skipped.length}.` : ''}
+            </p>
+            {result.errors?.length > 0 && <p className="error-msg">{result.errors.join(' · ')}</p>}
+            <p className="ov-note">Imported at Trading212's average cost as a single buy. (Per-trade history from Trading212 can come later.)</p>
+          </div>
+        )}
+
+        {warn && (
+          <div className="warn-msg">
+            <p>{warn}</p>
+            <div className="warn-actions">
+              <button className="btn-ghost" onClick={() => setWarn('')}>Go back &amp; fix</button>
+              <button className="btn-warn" onClick={() => doImport(true)} disabled={loading}>Import anyway</button>
+            </div>
+          </div>
+        )}
+
+        <div className="modal-actions">
+          {!result && <button className="btn-ghost" onClick={onClose}>Cancel</button>}
+          {!preview && !result && <button className="btn-primary" onClick={doPreview} disabled={loading || !apiKey.trim()}>{loading ? 'Fetching…' : 'Preview'}</button>}
+          {preview && !result && <button className="btn-primary" onClick={() => doImport(false)} disabled={loading || !canImport}>{loading ? 'Working…' : `Import ${chosen.length} selected`}</button>}
+          {result && <button className="btn-primary" onClick={onSynced}>Done</button>}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -589,8 +1245,8 @@ function BondsView() {
   const [showAdd, setShowAdd] = useState(false);
   const [editing, setEditing] = useState(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (isRefresh) => {
+    if (!isRefresh) setLoading(true);
     try { const r = await axios.get(`${API}/bonds`); setBonds(r.data); }
     catch { setBonds([]); }
     finally { setLoading(false); }
@@ -600,7 +1256,7 @@ function BondsView() {
   const del = async (id) => {
     if (!window.confirm('Delete this bond?')) return;
     await axios.delete(`${API}/bonds/${id}`);
-    load();
+    load(true);
   };
 
   const cur = (c) => ({ GBP: '£', USD: '$', CNY: '¥', EUR: '€' }[c] || '');
@@ -680,8 +1336,8 @@ function BondsView() {
         </div>
       )}
 
-      {showAdd && <BondModal onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); load(); }} />}
-      {editing && <BondModal existing={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />}
+      {showAdd && <BondModal onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); load(true); }} />}
+      {editing && <BondModal existing={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(true); }} />}
     </>
   );
 }
@@ -818,18 +1474,69 @@ function BondModal({ existing, onClose, onSaved }) {
 }
 
 // ============================ ADD POSITION MODAL ============================
+// Visual strategy picker: highlighted preset stickers + your remembered customs + a
+// "type your own" option. `value` is the strategy you INTEND (stated); the AI review
+// will later identify the strategy your behaviour actually reflects.
+function StrategyPicker({ value, onChange, used = [] }) {
+  const presetLabels = STRATEGY_PRESETS.map((p) => p.label);
+  const customUsed = (used || []).filter((u) => u && !presetLabels.includes(u));
+  const inputVal = (value && !presetLabels.includes(value) && !customUsed.includes(value)) ? value : '';
+  const [customOpen, setCustomOpen] = useState(!!inputVal);
+  return (
+    <div className="strategy-picker">
+      {STRATEGY_PRESETS.map((p) => (
+        <button type="button" key={p.label} title={p.desc}
+          className={`strategy-chip ${value === p.label ? 'active' : ''}`}
+          onClick={() => { setCustomOpen(false); onChange(p.label); }}>
+          <span className="sc-icon" aria-hidden="true">{p.icon}</span>
+          <span className="sc-label">{p.label}</span>
+          <span className="sc-desc">{p.desc}</span>
+        </button>
+      ))}
+      {customUsed.map((u) => (
+        <button type="button" key={u}
+          className={`strategy-chip ${value === u ? 'active' : ''}`}
+          onClick={() => { setCustomOpen(false); onChange(u); }}>
+          <span className="sc-icon" aria-hidden="true">🏷️</span>
+          <span className="sc-label">{u}</span>
+          <span className="sc-desc">your custom strategy</span>
+        </button>
+      ))}
+      <button type="button"
+        className={`strategy-chip ${customOpen || inputVal ? 'active' : ''}`}
+        onClick={() => setCustomOpen(true)}>
+        <span className="sc-icon" aria-hidden="true">＋</span>
+        <span className="sc-label">Custom</span>
+        <span className="sc-desc">type your own</span>
+      </button>
+      {(customOpen || inputVal) && (
+        <input className="strategy-custom-input" value={inputVal}
+          onChange={(e) => onChange(e.target.value)} placeholder="Name your strategy" autoFocus />
+      )}
+    </div>
+  );
+}
+
 function AddPositionModal({ onClose, onSaved }) {
   const [f, setF] = useState({
     ticker: '', name: '', asset_type: 'stock', currency: 'USD',
     date: new Date().toISOString().slice(0, 10), price: '', shares: '',
     thesis: '', sector: 'TMT', catalysts: '', target_price: '', stop_loss: '', conviction: '',
-    time_horizon: '', tracks: '', expense_ratio: '',
+    time_horizon: '', tracks: '', expense_ratio: '', strategy: '',
   });
   const [err, setErr] = useState('');
   const [saving, setSaving] = useState(false);
   const [matches, setMatches] = useState([]);
   const [activeField, setActiveField] = useState(null); // 'ticker' | 'name' | null
-  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const [verified, setVerified] = useState(false); // true once a search result is picked
+  const [warn, setWarn] = useState(''); // unverified-ticker warning text
+  const [usedStrategies, setUsedStrategies] = useState([]);
+  useEffect(() => { axios.get(`${API}/strategies`).then((r) => setUsedStrategies(r.data || [])).catch(() => {}); }, []);
+  // Editing the ticker by hand invalidates any prior verification.
+  const set = (k) => (e) => {
+    if (k === 'ticker') setVerified(false);
+    setF({ ...f, [k]: e.target.value });
+  };
 
   // Bidirectional lookup: typing in EITHER ticker or company searches the same
   // endpoint, and the dropdown appears under whichever field is active.
@@ -852,18 +1559,11 @@ function AddPositionModal({ onClose, onSaved }) {
     setF((prev) => ({ ...prev, ticker: m.symbol, name: m.name || '' }));
     setActiveField(null);
     setMatches([]);
+    setVerified(true);
+    setWarn('');
   };
 
-  const submit = async () => {
-    setErr('');
-    if (!f.ticker || !f.date || f.price === '' || f.shares === '') {
-      setErr('Ticker, date, price and shares are required.');
-      return;
-    }
-    if (!f.thesis.trim()) {
-      setErr('A one-line thesis is required — note why you own this.');
-      return;
-    }
+  const doSave = async () => {
     setSaving(true);
     try {
       const isEtf = f.asset_type === 'etf';
@@ -884,6 +1584,7 @@ function AddPositionModal({ onClose, onSaved }) {
         time_horizon: f.time_horizon || null,
         tracks: isEtf ? (f.tracks.trim() || null) : null,
         expense_ratio: isEtf && f.expense_ratio !== '' ? parseFloat(f.expense_ratio) : null,
+        strategy: f.strategy.trim() || null,
       };
       await axios.post(`${API}/holdings`, payload);
       onSaved();
@@ -891,6 +1592,34 @@ function AddPositionModal({ onClose, onSaved }) {
       setErr(e.response?.data?.error || 'Could not save position.');
       setSaving(false);
     }
+  };
+
+  const submit = async () => {
+    setErr('');
+    setWarn('');
+    if (!f.ticker || !f.date || f.price === '' || f.shares === '') {
+      setErr('Ticker, date, price and shares are required.');
+      return;
+    }
+    if (!f.thesis.trim()) {
+      setErr('A one-line thesis is required — note why you own this.');
+      return;
+    }
+    // If the ticker wasn't picked from search, verify it resolves to a real
+    // price on Yahoo before saving. If it doesn't, warn instead of saving.
+    if (!verified) {
+      setSaving(true);
+      try {
+        await axios.get(`${API}/price/${encodeURIComponent(f.ticker.trim().toUpperCase())}`);
+        // Resolved fine — treat as verified and save.
+        setSaving(false);
+      } catch {
+        setSaving(false);
+        setWarn(`"${f.ticker.trim().toUpperCase()}" didn't return a price from Yahoo — it may be mistyped (for London listings try adding ".L", e.g. EQQQ.L). Save it anyway?`);
+        return;
+      }
+    }
+    doSave();
   };
 
   return (
@@ -979,6 +1708,11 @@ function AddPositionModal({ onClose, onSaved }) {
           )}
         </div>
 
+        <div className="field">
+          <label>Strategy <span className="muted-hint">(how you intend to play it)</span></label>
+          <StrategyPicker value={f.strategy} onChange={(v) => setF({ ...f, strategy: v })} used={usedStrategies} />
+        </div>
+
         <div className="divider-label">First buy</div>
         <div className="field-row">
           <div className="field">
@@ -1029,10 +1763,19 @@ function AddPositionModal({ onClose, onSaved }) {
         </div>
 
         {err && <div className="error-msg">{err}</div>}
+        {warn && (
+          <div className="warn-msg">
+            <p>{warn}</p>
+            <div className="warn-actions">
+              <button className="btn-ghost" onClick={() => setWarn('')}>Go back &amp; fix</button>
+              <button className="btn-warn" onClick={() => { setWarn(''); doSave(); }} disabled={saving}>Save anyway</button>
+            </div>
+          </div>
+        )}
         <div className="modal-actions">
           <button className="btn-ghost" onClick={onClose}>Cancel</button>
           <button className="btn-primary" onClick={submit} disabled={saving}>
-            {saving ? 'Saving…' : `Add ${f.asset_type === 'etf' ? 'fund' : 'stock'} position`}
+            {saving ? 'Checking…' : `Add ${f.asset_type === 'etf' ? 'fund' : 'stock'} position`}
           </button>
         </div>
       </div>
@@ -1048,6 +1791,8 @@ function TransactionsDrawer({ holding, onClose }) {
     type: 'buy', date: new Date().toISOString().slice(0, 10), price: '', shares: '', notes: '',
   });
   const [err, setErr] = useState('');
+  const [closing, setClosing] = useState(null);          // { date, price } when a sell zeroed the position
+  const [exit, setExit] = useState({ reason: 'TakeProfit', note: '' });
 
   const load = useCallback(async () => {
     const r = await axios.get(`${API}/holdings/${holding.id}/transactions`);
@@ -1059,17 +1804,33 @@ function TransactionsDrawer({ holding, onClose }) {
     setErr('');
     if (tx.price === '' || tx.shares === '') { setErr('Price and shares are required.'); return; }
     try {
-      await axios.post(`${API}/holdings/${holding.id}/transactions`, {
+      const r = await axios.post(`${API}/holdings/${holding.id}/transactions`, {
         type: tx.type, date: tx.date,
         price: parseFloat(tx.price), shares: parseFloat(tx.shares),
         notes: tx.notes.trim() || null,
       });
+      const justClosed = tx.type === 'sell' && r.data.is_open === 0;
+      const sellInfo = { date: tx.date, price: tx.price };
       setAdding(false);
       setTx({ ...tx, price: '', shares: '', notes: '' });
-      load();
+      await load();
+      if (justClosed) setClosing(sellInfo); // ask why the position was closed
     } catch (e) {
       setErr(e.response?.data?.error || 'Could not add transaction.');
     }
+  };
+
+  const saveExit = async () => {
+    try {
+      await axios.patch(`${API}/holdings/${holding.id}/memo`, {
+        exit_reason: exit.reason,
+        exit_date: closing.date,
+        exit_price: closing.price === '' ? null : parseFloat(closing.price),
+        post_mortem: exit.note.trim() || null,
+      });
+    } catch { /* non-fatal — the sell is already recorded */ }
+    setClosing(null);
+    onClose();
   };
 
   const delTx = async (id) => {
@@ -1145,6 +1906,28 @@ function TransactionsDrawer({ holding, onClose }) {
           </div>
         )}
 
+        {closing && (
+          <div className="modal" style={{ padding: 16, marginBottom: 14, borderColor: 'var(--brick)' }}>
+            <div className="divider-label">Position closed — why did you sell?</div>
+            <p className="sub" style={{ marginBottom: 14 }}>Recorded to your Journal so the rationale is kept.</p>
+            <div className="field">
+              <label>Exit reason</label>
+              <select value={exit.reason} onChange={(e) => setExit({ ...exit, reason: e.target.value })}>
+                {EXIT_REASONS.map((x) => <option key={x} value={x}>{x}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>Post-mortem <span className="muted-hint">(what happened / what you learned)</span></label>
+              <textarea value={exit.note} onChange={(e) => setExit({ ...exit, note: e.target.value })}
+                placeholder="e.g. Sold AXT as it approached my average cost — thesis weakening." />
+            </div>
+            <div className="modal-actions">
+              <button className="btn-ghost" onClick={() => { setClosing(null); onClose(); }}>Skip</button>
+              <button className="btn-primary" onClick={saveExit}>Save to journal</button>
+            </div>
+          </div>
+        )}
+
         {data?.transactions.map((t) => (
           <div className="tx-row" key={t.id}>
             <span className={`tx-type ${t.type}`}>{t.type}</span>
@@ -1165,11 +1948,11 @@ function TransactionsDrawer({ holding, onClose }) {
 function MemoPage({ holding, onBack }) {
   const [memo, setMemo] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [analysing, setAnalysing] = useState(false);
-  const [critique, setCritique] = useState('');
   const [history, setHistory] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
   const [saveErr, setSaveErr] = useState('');
+  const [usedStrategies, setUsedStrategies] = useState([]);
+  useEffect(() => { axios.get(`${API}/strategies`).then((r) => setUsedStrategies(r.data || [])).catch(() => {}); }, []);
 
   const loadHistory = useCallback(() => {
     axios.get(`${API}/holdings/${holding.id}/thesis-history`)
@@ -1210,26 +1993,15 @@ function MemoPage({ holding, onBack }) {
     }
   };
 
-  // AI critique — backend endpoint (backlog item 6). Calls /api/holdings/:id/memo/analyse.
-  const analyse = async () => {
-    setAnalysing(true);
-    setCritique('');
-    try {
-      const r = await axios.post(`${API}/holdings/${holding.id}/memo/analyse`);
-      setCritique(r.data.critique || 'No critique returned.');
-    } catch (e) {
-      setCritique(e.response?.status === 404
-        ? 'AI analysis endpoint not built yet — that\'s backlog item 6.'
-        : (e.response?.data?.error || 'Analysis failed.'));
-    } finally {
-      setAnalysing(false);
-    }
-  };
-
-  const Field = ({ label, k, type = 'text', area, options }) => (
+  const Field = ({ label, k, type = 'text', area, options, custom }) => (
     <div className="field">
       <label>{label}</label>
-      {options ? (
+      {custom ? (
+        <>
+          <input list={`dl-${k}`} value={memo[k] ?? ''} onChange={set(k)} autoComplete="off" />
+          <datalist id={`dl-${k}`}>{(options || []).map((o) => <option key={o} value={o} />)}</datalist>
+        </>
+      ) : options ? (
         <select value={memo[k] ?? ''} onChange={set(k)}>
           <option value="">—</option>
           {options.map((o) => <option key={o} value={o}>{o}</option>)}
@@ -1282,6 +2054,10 @@ function MemoPage({ holding, onBack }) {
           <Field label="Catalysts" k="catalysts" area />
         </>
       )}
+      <div className="field">
+        <label>Strategy <span className="muted-hint">(what you intend — AI review will flag what your behaviour actually shows)</span></label>
+        <StrategyPicker value={memo.strategy || ''} onChange={(v) => setMemo({ ...memo, strategy: v })} used={usedStrategies} />
+      </div>
       <div className="field-row">
         <Field label="Target price" k="target_price" type="number" />
         <Field label="Stop loss" k="stop_loss" type="number" />
@@ -1310,18 +2086,8 @@ function MemoPage({ holding, onBack }) {
       </div>
       <Field label="Post-mortem" k="post_mortem" area />
 
-      {critique && (
-        <div className="ai-box">
-          <span className="mono">Haiku critique</span>
-          {critique}
-        </div>
-      )}
-
       {saveErr && <div className="error-msg">{saveErr}</div>}
       <div className="modal-actions">
-        <button className="btn-ghost" onClick={analyse} disabled={analysing}>
-          {analysing ? 'Analysing…' : 'AI analyse'}
-        </button>
         <button className="btn-primary" onClick={save} disabled={saving}>
           {saving ? 'Saving…' : 'Save memo'}
         </button>
@@ -1349,8 +2115,8 @@ function BudgetTab() {
   const [baseCur, setBaseCur] = useState('GBP');
   const [showAdd, setShowAdd] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (isRefresh) => {
+    if (!isRefresh) setLoading(true);
     try {
       const r = await axios.get(`${API}/expenses?month=${month}`);
       setData(r.data);
@@ -1363,11 +2129,11 @@ function BudgetTab() {
 
   const saveSettings = async (patch) => {
     await axios.patch(`${API}/budget/settings`, patch);
-    load();
+    load(true);
   };
   const delExpense = async (id) => {
     await axios.delete(`${API}/expenses/${id}`);
-    load();
+    load(true);
   };
 
   const sym = (c) => ({ GBP: '£', USD: '$', CNY: '¥', EUR: '€', HKD: 'HK$', JPY: '¥' }[c] || (c + ' '));
@@ -1565,7 +2331,7 @@ function BudgetTab() {
         </>
       )}
 
-      {showAdd && <AddExpenseModal baseCur={baseCur} onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); load(); }} />}
+      {showAdd && <AddExpenseModal baseCur={baseCur} onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); load(true); }} />}
     </>
   );
 }
@@ -1665,6 +2431,7 @@ function CashTab() {
       switch (sortKey) {
         case 'bank': av = a.bank || ''; bv = b.bank || ''; break;
         case 'product': av = a.product || ''; bv = b.product || ''; break;
+        case 'type': av = accountTypeLabel(a); bv = accountTypeLabel(b); break;
         case 'balance': av = bal(a); bv = bal(b); break;
         case 'rate': av = a.your_rate ?? -Infinity; bv = b.your_rate ?? -Infinity; break;
         case 'matures': av = a.maturity_date || ''; bv = b.maturity_date || ''; break;
@@ -1677,8 +2444,8 @@ function CashTab() {
   const allRows = Object.values(grouped).flat();
   const currencies = ['all', ...Array.from(new Set(allRows.map((a) => a.currency)))];
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (isRefresh) => {
+    if (!isRefresh) setLoading(true);
     const r = await axios.get(`${API}/cash`);
     setGrouped(r.data);
     setLoading(false);
@@ -1688,7 +2455,7 @@ function CashTab() {
   const del = async (id) => {
     if (!window.confirm('Delete this account?')) return;
     await axios.delete(`${API}/cash/${id}`);
-    load();
+    load(true);
   };
 
   return (
@@ -1745,14 +2512,27 @@ function CashTab() {
           if (rows.length === 0) return null;
           return (
           <div className="cash-group" key={country}>
-            <h3><span className="flag">{COUNTRY_FLAGS[country] || '🏦'}</span> {country}</h3>
+            <h3>
+              <span><span className="flag">{COUNTRY_FLAGS[country] || '🏦'}</span> {country}</span>
+              <span className="region-total">{(() => {
+                const sym = (c) => ({ GBP: '£', USD: '$', CNY: '¥', EUR: '€', HKD: 'HK$', JPY: '¥' }[c] || (c + ' '));
+                const byCur = {};
+                for (const a of rows) {
+                  const v = (a.is_monthly_saver && a.accrued_balance != null) ? a.accrued_balance : a.balance;
+                  byCur[a.currency] = (byCur[a.currency] || 0) + (v || 0);
+                }
+                return Object.entries(byCur)
+                  .map(([c, t]) => `${sym(c)}${t.toLocaleString(undefined, { maximumFractionDigits: 0 })}`)
+                  .join('  ·  ');
+              })()}</span>
+            </h3>
             <div className="table-wrap">
-              <table>
+              <table className="accounts-table">
                 <thead>
                   <tr>
                     <th className="left sortable" onClick={() => toggleSort('bank')}>Bank{arrow('bank')}</th>
                     <th className="left sortable" onClick={() => toggleSort('product')}>Product{arrow('product')}</th>
-                    <th className="left">Type</th>
+                    <th className="left sortable" onClick={() => toggleSort('type')}>Type{arrow('type')}</th>
                     <th className="sortable" onClick={() => toggleSort('balance')}>Balance{arrow('balance')}</th>
                     <th className="sortable" onClick={() => toggleSort('rate')}>Rate{arrow('rate')}</th>
                     <th>Term</th>
@@ -1796,8 +2576,8 @@ function CashTab() {
         })
       )}
 
-      {showAdd && <AddCashModal onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); load(); }} />}
-      {editing && <AddCashModal existing={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />}
+      {showAdd && <AddCashModal onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); load(true); }} />}
+      {editing && <AddCashModal existing={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(true); }} />}
       </>
       )}
     </>
@@ -1895,7 +2675,7 @@ function AddCashModal({ existing, onClose, onSaved }) {
         <div className="field-row">
           <div className="field">
             <label>Bank</label>
-            <SearchSelect value={f.bank} onChange={setVal('bank')} options={BANKS} placeholder="Search bank…" />
+            <SearchSelect value={f.bank} onChange={setVal('bank')} options={BANKS} placeholder="Search or type bank…" allowCustom />
           </div>
           <div className="field">
             <label>Product</label>

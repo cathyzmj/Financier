@@ -102,6 +102,16 @@ input, select, textarea { font-family: var(--font-body); }
   display: inline-block;
   /* intentionally blank — logo TBD */
 }
+.app-version {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 400;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  align-self: flex-start;
+  margin-left: 8px;
+  margin-top: 4px;
+}
 
 .summary-strip {
   display: flex;
@@ -187,6 +197,7 @@ th.sortable:hover { color: var(--brick); }
 }
 .csv-btn:hover { background: var(--input); color: var(--cobalt); border-color: var(--cobalt); }
 .divider-with-action { display: flex; align-items: center; justify-content: space-between; }
+.head-actions { display: flex; align-items: center; gap: 10px; }
 .nav button {
   background: transparent;
   border: 1px solid var(--rule);
@@ -467,6 +478,20 @@ tbody tr:hover td { background: var(--input); }
   display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px;
 }
 .error-msg { color: var(--negative); font-size: 0.85rem; margin-top: 10px; }
+
+/* IBKR import — wider modal + inline-editable preview cells */
+.modal-ibkr { max-width: 840px; }
+.ibkr-preview table { min-width: 0; }
+.ibkr-preview table th { padding: 8px; }
+.ibkr-preview table td { padding: 7px 8px; vertical-align: middle; }
+.ibkr-preview table input:not([type="checkbox"]) {
+  background: var(--input); border: 1px solid var(--border); border-radius: 0;
+  padding: 5px 7px; font-family: var(--font-mono); font-size: 0.78rem;
+  color: var(--text); width: 100%; min-width: 0;
+}
+.ibkr-preview table input:focus { outline: 2px solid var(--cobalt); outline-offset: -1px; }
+.ibkr-preview table input:disabled { opacity: 0.5; cursor: not-allowed; }
+.ibkr-preview table input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--cobalt); cursor: pointer; }
 
 /* ===================== TRANSACTIONS DRAWER ===================== */
 .drawer-backdrop { position: fixed; inset: 0; background: rgba(26,24,20,0.4); z-index: 40; }
@@ -752,9 +777,100 @@ tbody tr:hover td { background: var(--input); }
   font-family: var(--font-display);
   font-size: 1.15rem; font-weight: 800;
   margin-bottom: 10px;
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: baseline; gap: 8px;
+  justify-content: space-between;
 }
+.cash-group h3 > span:first-child { display: flex; align-items: center; gap: 8px; }
+.region-total { font-family: var(--font-mono); font-size: 0.8rem; font-weight: 400; color: var(--muted); font-variant-numeric: tabular-nums; }
 .flag { font-size: 1.2rem; }
+
+/* Fixed column widths so every country's accounts table aligns identically. */
+.accounts-table { table-layout: fixed; width: 100%; }
+.accounts-table th:nth-child(1), .accounts-table td:nth-child(1) { width: 19%; }
+.accounts-table th:nth-child(2), .accounts-table td:nth-child(2) { width: 17%; }
+.accounts-table th:nth-child(3), .accounts-table td:nth-child(3) { width: 16%; }
+.accounts-table th:nth-child(4), .accounts-table td:nth-child(4) { width: 13%; }
+.accounts-table th:nth-child(5), .accounts-table td:nth-child(5) { width: 7%; }
+.accounts-table th:nth-child(6), .accounts-table td:nth-child(6) { width: 6%; }
+.accounts-table th:nth-child(7), .accounts-table td:nth-child(7) { width: 9%; }
+.accounts-table th:nth-child(8), .accounts-table td:nth-child(8) { width: 9%; }
+.accounts-table th:nth-child(9), .accounts-table td:nth-child(9) { width: 4%; }
+.accounts-table td { overflow: hidden; text-overflow: ellipsis; }
+
+.legend-pct { font-family: var(--font-mono); font-size: 0.7rem; color: var(--text); flex: 0 0 auto; font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; }
+
+.warn-msg {
+  border: 1px solid var(--ochre);
+  background: rgba(232,163,44,0.1);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+.warn-msg p { font-size: 0.85rem; color: var(--text); margin: 0 0 10px; line-height: 1.45; }
+.warn-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.btn-warn {
+  background: var(--ochre); color: var(--rule); border: 1px solid var(--ochre);
+  padding: 7px 16px; font-family: var(--font-mono); font-size: 0.68rem;
+  text-transform: uppercase; letter-spacing: 0.06em; cursor: pointer; font-weight: 500;
+}
+.btn-warn:hover { filter: brightness(0.95); }
+
+/* ===================== JOURNAL ===================== */
+.journal-section { margin-bottom: 26px; }
+.journal-card {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+}
+.jc-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.jc-name { color: var(--muted); font-size: 0.85rem; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jc-status {
+  font-family: var(--font-mono); font-size: 0.56rem; text-transform: uppercase;
+  letter-spacing: 0.06em; padding: 1px 7px; color: var(--bg);
+}
+.jc-status.open { background: var(--cobalt); }
+.jc-status.closed { background: var(--muted); }
+.jc-pnl { font-family: var(--font-mono); font-size: 0.85rem; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+.jc-thesis { margin: 9px 0; font-size: 0.95rem; line-height: 1.45; }
+.jc-meta { display: flex; gap: 16px; flex-wrap: wrap; font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); }
+.jc-postmortem { margin-top: 9px; font-size: 0.9rem; border-left: 3px solid var(--ochre); padding-left: 10px; line-height: 1.45; }
+.jc-postmortem .mono { display: block; margin-bottom: 2px; }
+.journal-card .link-btn { margin-top: 9px; }
+.journal-card.clickable { cursor: pointer; transition: border-color 0.15s; }
+.journal-card.clickable:hover { border-color: var(--cobalt); }
+
+/* Strategy picker — sticker chips */
+.strategy-picker { display: flex; flex-wrap: wrap; gap: 8px; }
+.strategy-chip {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  flex: 1 1 150px; min-width: 140px; text-align: left;
+  background: var(--input); border: 1px solid var(--border); border-radius: 0;
+  padding: 9px 11px; cursor: pointer; font-family: var(--font-body);
+}
+.strategy-chip:hover { border-color: var(--cobalt); }
+.strategy-chip.active { border-color: var(--brick); background: rgba(200, 67, 31, 0.08); box-shadow: inset 0 0 0 1px var(--brick); }
+.sc-icon { font-size: 1.15rem; line-height: 1; }
+.sc-label { font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text); }
+.sc-desc { font-size: 0.7rem; color: var(--muted); line-height: 1.3; }
+.strategy-custom-input {
+  flex: 1 1 100%; background: var(--input); border: 1px solid var(--border);
+  border-radius: 0; padding: 9px 11px; font-size: 0.95rem; color: var(--text);
+}
+.strategy-custom-input:focus { outline: 2px solid var(--cobalt); outline-offset: -1px; }
+
+/* Journal AI analysis */
+.key-row { display: flex; gap: 8px; margin-bottom: 14px; }
+.key-row input {
+  flex: 1 1 auto; background: var(--input); border: 1px solid var(--border);
+  border-radius: 0; padding: 9px 11px; font-family: var(--font-mono); font-size: 0.82rem; color: var(--text);
+}
+.ai-box.warn { border-left-color: var(--ochre); }
+.ai-box .md { white-space: normal; }
+.md-h { font-family: var(--font-display); font-size: 0.98rem; font-weight: 800; margin: 14px 0 6px; }
+.md-h:first-child { margin-top: 0; }
+.md-p { margin: 0 0 8px; line-height: 1.5; }
+.ai-box .md ul { margin: 0 0 8px; padding-left: 20px; }
+.ai-box .md li { margin: 3px 0; line-height: 1.45; }
 
 /* ===================== STATES ===================== */
 .empty {
