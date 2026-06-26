@@ -10,7 +10,7 @@ import './App.css';
 const API = 'http://127.0.0.1:8000/api';
 
 // Bump on each released change set (semver: MAJOR.MINOR.PATCH). Shown in the header.
-const APP_VERSION = '2.8.0';
+const APP_VERSION = '2.8.1';
 
 // Common Yahoo Finance exchange suffixes — offered as suggestions when editing an
 // IBKR import ticker (e.g. typing "2DG." suggests 2DG.MU, 2DG.F, …).

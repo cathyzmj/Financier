@@ -13,6 +13,19 @@ To cut a new version: pick the number per the rules above, update `APP_VERSION` 
 
 ---
 
+## v2.8.1 — 2026-06-26 — Fix: average cost wrong after a sell
+### Fixed
+- Average cost was computed as `total buy cost ÷ total buy shares` over ALL buys, so a
+  fully-sold cheap batch kept dragging the average down (MRVL showed $198.76 vs IBKR's
+  $262.17). Switched to **moving-average cost basis**: a sell removes shares at the
+  running average, leaving the average of the remaining shares unchanged — matching the
+  broker. Verified against real trades (MRVL/NVDA/SNDK now match IBKR to the cent;
+  residual = commissions in IBKR's basis).
+- One `positionFromTxns()` helper now drives the holdings table, the transactions
+  drawer, the journal (incl. correct realized/unrealized P&L), and the Overview
+  reconstruction. Cost is computed at request time, so it self-corrects on restart —
+  no data change needed.
+
 ## v2.8.0 — 2026-06-25 — AI decision review
 ### Added
 - **Decision review** in the Journal: "Review decisions (AI)" and "Style profile (AI)"

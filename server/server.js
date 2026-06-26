@@ -126,17 +126,30 @@ app.use(cors({
 }));
 
 // ---- Helpers: position math ----
-function computePosition(holdingId) {
-  const txns = db.prepare('SELECT * FROM transactions WHERE holding_id = ?').all(holdingId);
-  let boughtShares = 0, boughtCost = 0, soldShares = 0;
-  for (const t of txns) {
-    if (t.type === 'buy') { boughtShares += t.shares; boughtCost += t.price * t.shares; }
-    else if (t.type === 'sell') { soldShares += t.shares; }
+// Moving-average cost basis (the broker-standard method). A sell removes shares at the
+// CURRENT average, so it never distorts the average cost of the shares that remain —
+// matching IBKR. (The old "total buy cost / total buy shares" was wrong after any sell.)
+function positionFromTxns(txns) {
+  const sorted = [...txns].sort((a, b) =>
+    (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.id || 0) - (b.id || 0)));
+  let shares = 0, cost = 0, realized = 0;
+  for (const t of sorted) {
+    if (t.type === 'buy') {
+      cost += t.price * t.shares;
+      shares += t.shares;
+    } else { // sell at the running average; profit is locked in as realized
+      const avg = shares > 0 ? cost / shares : 0;
+      realized += (t.price - avg) * t.shares;
+      shares -= t.shares;
+      cost = shares > 0.0000001 ? avg * shares : 0; // avg unchanged by the sell
+    }
   }
-  const totalShares = boughtShares - soldShares;
-  const avgCost = boughtShares > 0 ? boughtCost / boughtShares : 0;
-  const costBasis = totalShares * avgCost;
-  return { totalShares, avgCost, costBasis };
+  const avgCost = shares > 0.0000001 ? cost / shares : 0;
+  return { totalShares: shares, avgCost, costBasis: shares > 0 ? cost : 0, realizedPnl: realized };
+}
+
+function computePosition(holdingId) {
+  return positionFromTxns(db.prepare('SELECT * FROM transactions WHERE holding_id = ?').all(holdingId));
 }
 
 // Re-evaluate is_open after a sell brings shares to 0
@@ -419,21 +432,14 @@ async function buildJournalRows() {
   for (const h of holdings) {
     const memo = db.prepare('SELECT * FROM memos WHERE holding_id = ?').get(h.id) || {};
     const txns = db.prepare('SELECT * FROM transactions WHERE holding_id = ? ORDER BY date ASC, id ASC').all(h.id);
-    let boughtShares = 0, boughtCost = 0, soldShares = 0, soldProceeds = 0;
-    for (const t of txns) {
-      if (t.type === 'buy') { boughtShares += t.shares; boughtCost += t.price * t.shares; }
-      else { soldShares += t.shares; soldProceeds += t.price * t.shares; }
-    }
-    const totalShares = boughtShares - soldShares;
-    const avgCost = boughtShares > 0 ? boughtCost / boughtShares : 0;
-    const realizedPnl = soldShares > 0 ? soldProceeds - soldShares * avgCost : 0;
+    const { totalShares, avgCost, costBasis, realizedPnl } = positionFromTxns(txns);
     const firstBuy = txns.find((t) => t.type === 'buy');
     const lastSell = [...txns].reverse().find((t) => t.type === 'sell');
     let currentPrice = null, unrealizedPnl = null;
     if (h.is_open && totalShares > 0.0000001) {
       const p = await getPrice(h.ticker);
       currentPrice = p.price;
-      if (currentPrice != null) unrealizedPnl = round2(totalShares * currentPrice - totalShares * avgCost);
+      if (currentPrice != null) unrealizedPnl = round2(totalShares * currentPrice - costBasis);
     }
     const hist = db.prepare('SELECT thesis, logged_at FROM thesis_history WHERE holding_id = ? ORDER BY logged_at ASC, id ASC').all(h.id);
     out.push({
@@ -907,13 +913,8 @@ app.get('/api/overview/timeseries', async (req, res) => {
       for (const h of holdings) {
         const txns = txByHolding[h.id].filter((t) => t.date <= iso);
         if (txns.length === 0) continue;
-        let shares = 0, boughtShares = 0, boughtCost = 0;
-        for (const t of txns) {
-          if (t.type === 'buy') { shares += t.shares; boughtShares += t.shares; boughtCost += t.price * t.shares; }
-          else if (t.type === 'sell') { shares -= t.shares; }
-        }
+        const { totalShares: shares, costBasis: cb } = positionFromTxns(txns);
         if (shares <= 0.0000001) continue;
-        const avg = boughtShares > 0 ? boughtCost / boughtShares : 0;
 
         const close = histByHolding[h.id][iso];
         if (close != null) lastClose[h.id] = close;
@@ -921,7 +922,7 @@ app.get('/api/overview/timeseries', async (req, res) => {
         if (px == null) continue;
 
         value += shares * px;
-        costBasis += shares * avg;
+        costBasis += cb;
         priced = true;
       }
 
