@@ -98,6 +98,28 @@ works exactly as it does in production.
 
 ---
 
+## Desktop app (no terminal)
+
+`desktop/` packages Financier as a real Mac/Windows/Linux app: the server runs inside it,
+there's no terminal, no port to remember and no login screen — on a desktop app your OS
+account is the boundary, and the data never leaves the machine.
+
+Your data lives in the OS application-data folder (**Help → About Financier** shows the
+exact path; **File → Open Data Folder** opens it), not in `~/asset-tracker`.
+
+```bash
+cd web && npm install && npm run build     # the UI it embeds
+cd ../desktop && npm install
+npx electron-rebuild -f -w better-sqlite3  # native SQLite, rebuilt for Electron's ABI
+npm start                                  # run it
+npm run dist:mac                           # or dist:win / dist:linux → desktop/release/
+```
+
+The build is unsigned, so the first launch needs **right-click → Open** on macOS (or
+"More info → Run anyway" on Windows). Signing needs a paid developer account.
+
+---
+
 ## Access it from your phone (Tailscale)
 
 Financier stays on your own machine — Tailscale just builds a private network between

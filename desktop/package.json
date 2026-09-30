@@ -1,0 +1,46 @@
+{
+  "name": "financier-desktop",
+  "productName": "Financier",
+  "version": "2.12.0",
+  "description": "Financier as a desktop app — the server runs inside, your data stays on your machine.",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "prepare-bundle": "node prepare.js",
+    "start": "npm run prepare-bundle && electron .",
+    "dist": "npm run prepare-bundle && electron-builder",
+    "dist:mac": "npm run prepare-bundle && electron-builder --mac",
+    "dist:win": "npm run prepare-bundle && electron-builder --win",
+    "dist:linux": "npm run prepare-bundle && electron-builder --linux"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "better-sqlite3": "^11.0.0",
+    "cors": "^2.8.5",
+    "express": "^4.19.0"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.cathyzmj.financier",
+    "productName": "Financier",
+    "directories": { "output": "release" },
+    "files": [
+      "main.js",
+      "server-bundle/**/*",
+      "web-dist/**/*",
+      "node_modules/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*"
+    ],
+    "mac": {
+      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }],
+      "category": "public.app-category.finance"
+    },
+    "win": { "target": ["nsis"] },
+    "linux": { "target": ["AppImage"], "category": "Office" }
+  }
+}

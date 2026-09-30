@@ -13,6 +13,39 @@ To cut a new version: pick the number per the rules above, update `APP_VERSION` 
 
 ---
 
+## v2.12.0 — 2026-09-30 — Desktop app (Electron)
+Financier as a real double-click app, so using it no longer requires a terminal, Node,
+`npm install` or a port number. This is what makes it shareable with someone who isn't
+a developer — the thing GitHub alone couldn't solve.
+### Added
+- **`desktop/`** — Electron wrapper that runs the *same* Express server in-process and
+  points a window at it. No fork of the app: identical API, UI and SQLite format.
+- Random free port instead of 8000, so a packaged copy never fights a dev server (or a
+  second copy) for a well-known port. Single-instance lock, since two windows on one
+  SQLite file is asking for trouble.
+- Data lives in the OS application-data folder (`~/Library/Application Support/Financier`
+  on macOS) via the existing `FINANCIER_DB_PATH` hook — **Help → About** shows the path,
+  **File → Open Data Folder** opens it.
+- No login screen: on a desktop app the OS account is the security boundary and the
+  server is loopback-only. The v2.10.0 interlock still holds — it cannot bind wider than
+  loopback without a password, so this can't silently become network-exposed.
+- External links open in the real browser, never inside the app window.
+- `npm run dist:mac|dist:win|dist:linux` → dmg / nsis / AppImage in `desktop/release/`.
+### Notes
+- Two things caught in testing and fixed: the bundled `server.js` had to be copied as
+  `server.mjs` (it's ESM, but `desktop/` is CommonJS for Electron's sake, so Node parsed
+  it as CJS and the server never started); and `app.getName()` reads package.json `name`
+  before electron-builder's `productName`, so data was landing in a folder called
+  `financier-desktop` — fixed with a top-level `productName`.
+- `better-sqlite3` is native and must be rebuilt for Electron's ABI
+  (`npx electron-rebuild -f -w better-sqlite3`); it's `asarUnpack`ed so the `.node` is
+  loadable from the packaged bundle.
+- Builds are **unsigned** — first launch needs right-click → Open on macOS. Signing needs
+  a paid Apple developer account. Windows/Linux builds want CI; only arm64 macOS has been
+  built and run here.
+- Verified: dev run and the packaged `.app` both start the embedded server, serve the UI
+  (200) and answer the API (200), and create their database in the right folder.
+
 ## v2.11.0 — 2026-09-30 — Price chart + the correctness fixes (rebuilt v2.9 work)
 The v2.9.0/v2.9.1 work was built on a machine that became unavailable before it was ever
 pushed. This rebuilds it on top of v2.10.0. (Numbered 2.11 rather than 2.9 because it
