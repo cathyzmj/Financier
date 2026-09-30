@@ -12,6 +12,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import https from 'https';
 import dns from 'dns';
+import crypto from 'crypto';
 import { execSync } from 'child_process';
 
 // This Mac's IPv6 stack is broken (same reason the server binds 127.0.0.1, not
@@ -67,9 +68,25 @@ const DB_PATH = process.env.FINANCIER_DB_PATH
 // Schema lives next to this file; allow override for packaged apps.
 const SCHEMA_PATH = process.env.FINANCIER_SCHEMA_PATH
   || path.join(__dirname, 'schema.sql');
-const PORT = 8000;
-const HOST = '127.0.0.1';
+const PORT = Number(process.env.FINANCIER_PORT) || 8000;
+// Bind address. Defaults to loopback (only this machine). Set FINANCIER_HOST=0.0.0.0
+// to reach it from your other devices over Tailscale — that REQUIRES a password (the
+// guard below refuses to start otherwise, so the app can never be exposed unprotected).
+const HOST = process.env.FINANCIER_HOST || '127.0.0.1';
+const PASSWORD = process.env.FINANCIER_PASSWORD || '';
+const IS_LOOPBACK = HOST === '127.0.0.1' || HOST === 'localhost' || HOST === '::1';
+if (!IS_LOOPBACK && !PASSWORD) {
+  console.error(`
+Refusing to start: FINANCIER_HOST is "${HOST}" (reachable from other machines) but
+FINANCIER_PASSWORD is not set. Your holdings, transactions and account references
+would be readable and writable by anyone who can reach this port.
+
+Set a password in server/.env:   FINANCIER_PASSWORD=your-long-passphrase
+`);
+  process.exit(1);
+}
 const PRICE_TTL_MS = 15 * 60 * 1000; // 15-min cache
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // stay logged in for 30 days
 
 // Ensure the DB directory exists (userData dir may not have it yet).
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
@@ -110,6 +127,54 @@ function migrate() {
 }
 try { migrate(); } catch (e) { console.error('migration warning:', e.message); }
 
+// ---- Auth ----
+// Small key/value table for server-side state that isn't user data (currently just the
+// session-signing secret, kept so a restart doesn't log your phone out).
+db.exec(`CREATE TABLE IF NOT EXISTS app_meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+)`);
+function metaGet(key) { return db.prepare('SELECT value FROM app_meta WHERE key = ?').get(key)?.value ?? null; }
+function metaSet(key, value) {
+  db.prepare(`INSERT INTO app_meta (key, value) VALUES (?, ?)
+              ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key, value);
+}
+let SESSION_SECRET = metaGet('session_secret');
+if (!SESSION_SECRET) { SESSION_SECRET = crypto.randomBytes(32).toString('hex'); metaSet('session_secret', SESSION_SECRET); }
+
+// Session token = "<expiry-ms>.<HMAC>", signed with the stored secret. Stateless, so
+// there's no session table to expire; changing the password can't invalidate it, but
+// deleting the app_meta row does.
+function signToken(expiresAt) {
+  const mac = crypto.createHmac('sha256', SESSION_SECRET).update(String(expiresAt)).digest('base64url');
+  return `${expiresAt}.${mac}`;
+}
+function verifyToken(token) {
+  const [exp, mac] = String(token || '').split('.');
+  if (!exp || !mac) return false;
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(exp).digest('base64url');
+  const a = Buffer.from(mac), b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+  return Number(exp) > Date.now();
+}
+// Constant-time password check — a plain === leaks the password length/prefix by timing.
+function passwordMatches(supplied) {
+  const a = Buffer.from(String(supplied ?? ''), 'utf8');
+  const b = Buffer.from(PASSWORD, 'utf8');
+  if (a.length !== b.length) { crypto.timingSafeEqual(b, b); return false; }
+  return crypto.timingSafeEqual(a, b);
+}
+function parseCookies(header) {
+  const out = {};
+  for (const part of String(header || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+const COOKIE_NAME = 'financier_session';
+const AUTH_ENABLED = !!PASSWORD;
+
 // Tables exported/imported by the backup feature.
 const BACKUP_TABLES = [
   'holdings', 'transactions', 'memos', 'thesis_history',
@@ -118,12 +183,65 @@ const BACKUP_TABLES = [
 
 // ---- App ----
 const app = express();
-app.use(express.json());
-// The server only ever binds 127.0.0.1, so it's not network-exposed. Allow the
-// Vite dev origins and Electron's file:// origin (which sends Origin: null / none).
+app.use(express.json({ limit: '50mb' })); // backup import can be large
+// CORS must be strict now that the server can bind beyond loopback: reflecting every
+// origin would let any website you visit read the whole portfolio (or POST /api/import)
+// by fetching this host in the background. The UI is served from this same origin, so
+// it needs no CORS at all; this only keeps the Vite dev server and Electron working.
+const ALLOWED_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|[\w-]+\.ts\.net|100\.\d+\.\d+\.\d+)(:\d+)?$/;
 app.use(cors({
-  origin: (origin, cb) => cb(null, true),
+  credentials: true,
+  origin: (origin, cb) => cb(null, !origin || origin === 'null' || ALLOWED_ORIGIN.test(origin)),
 }));
+
+// ---- Auth gate ----
+// Everything under /api requires a valid session cookie, except the auth endpoints
+// themselves. Mounted before any route below, so a new endpoint is protected by default.
+const OPEN_PATHS = new Set(['/auth/login', '/auth/status']);
+app.use('/api', (req, res, next) => {
+  if (!AUTH_ENABLED || OPEN_PATHS.has(req.path)) return next();
+  if (verifyToken(parseCookies(req.headers.cookie)[COOKIE_NAME])) return next();
+  res.status(401).json({ error: 'unauthorized' });
+});
+
+// GET /api/auth/status — does this deployment need a login, and am I already in?
+app.get('/api/auth/status', (req, res) => {
+  res.json({
+    auth_required: AUTH_ENABLED,
+    authenticated: !AUTH_ENABLED || verifyToken(parseCookies(req.headers.cookie)[COOKIE_NAME]),
+  });
+});
+
+// POST /api/auth/login { password } — sets an httpOnly session cookie.
+// httpOnly means page scripts can't read it; SameSite=Lax blocks cross-site form posts.
+// `Secure` only when actually on HTTPS — plain http:// over Tailscale would drop it.
+let loginFailures = 0, lockedUntil = 0;
+app.post('/api/auth/login', (req, res) => {
+  if (!AUTH_ENABLED) return res.json({ ok: true, auth_required: false });
+  if (Date.now() < lockedUntil) {
+    return res.status(429).json({ error: 'Too many attempts — wait a minute and try again.' });
+  }
+  if (!passwordMatches(req.body?.password)) {
+    if (++loginFailures >= 8) { lockedUntil = Date.now() + 60000; loginFailures = 0; }
+    return res.status(401).json({ error: 'Wrong password.' });
+  }
+  loginFailures = 0;
+  const expiresAt = Date.now() + SESSION_TTL_MS;
+  const secure = req.secure || req.headers['x-forwarded-proto'] === 'https';
+  res.setHeader('Set-Cookie', [
+    `${COOKIE_NAME}=${signToken(expiresAt)}`,
+    'Path=/', 'HttpOnly', 'SameSite=Lax',
+    `Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+    ...(secure ? ['Secure'] : []),
+  ].join('; '));
+  res.json({ ok: true });
+});
+
+// POST /api/auth/logout — clear the cookie on this device.
+app.post('/api/auth/logout', (req, res) => {
+  res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  res.json({ ok: true });
+});
 
 // ---- Helpers: position math ----
 // Moving-average cost basis (the broker-standard method). A sell removes shares at the
@@ -1560,8 +1678,26 @@ app.post('/api/t212/sync', async (req, res) => {
   }
 });
 
+// ---- Serve the built UI ----
+// Registered last so it never shadows an /api route. With the frontend served from the
+// same origin as the API there's one URL, one port, and no CORS involved at all — which
+// is what makes a single Tailscale address work from any of your devices.
+const WEB_DIR = process.env.FINANCIER_WEB_DIR || path.join(__dirname, '..', 'web', 'dist');
+if (fs.existsSync(path.join(WEB_DIR, 'index.html'))) {
+  app.use(express.static(WEB_DIR));
+  // SPA fallback: any non-/api path returns index.html so client routing works.
+  app.get(/^(?!\/api\/).*/, (req, res) => res.sendFile(path.join(WEB_DIR, 'index.html')));
+}
+
   return app.listen(PORT, HOST, () => {
-    console.log(`Financier backend running at http://${HOST}:${PORT}`);
+    const shown = HOST === '0.0.0.0' ? 'localhost' : HOST;
+    console.log(`Financier running at http://${shown}:${PORT}`);
+    if (!fs.existsSync(path.join(WEB_DIR, 'index.html'))) {
+      console.log('No built UI found — run "npm run build" in web/, or use the Vite dev server.');
+    }
+    console.log(AUTH_ENABLED
+      ? `Login required${IS_LOOPBACK ? '' : ' — reachable from your other devices on this network'}.`
+      : 'No password set: loopback only, no login. Set FINANCIER_PASSWORD to enable access from other devices.');
   });
 }
 

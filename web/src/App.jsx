@@ -6,11 +6,15 @@ import {
 } from 'recharts';
 import './App.css';
 
-// Backend MUST be 127.0.0.1 — localhost resolves to IPv6 on this Mac and refuses connection.
-const API = 'http://127.0.0.1:8000/api';
+// Same-origin API. In production Express serves this build and the API together; in dev
+// Vite proxies /api to :8000. Relative means the app works at ANY address it's opened
+// from — localhost, or your Tailscale hostname on your phone — with nothing hardcoded.
+const API = '/api';
+// Send the session cookie with every request.
+axios.defaults.withCredentials = true;
 
 // Bump on each released change set (semver: MAJOR.MINOR.PATCH). Shown in the header.
-const APP_VERSION = '2.8.1';
+const APP_VERSION = '2.10.0';
 
 // Common Yahoo Finance exchange suffixes — offered as suggestions when editing an
 // IBKR import ticker (e.g. typing "2DG." suggests 2DG.MU, 2DG.F, …).
@@ -140,7 +144,71 @@ function SearchSelect({ value, onChange, options, placeholder, allowCustom }) {
   );
 }
 
+// ============================ LOGIN ============================
+// Shown instead of the app until a session cookie exists. The password never touches
+// localStorage — the server replies with an httpOnly cookie that scripts can't read.
+function LoginScreen({ onIn }) {
+  const [password, setPassword] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e) => {
+    e?.preventDefault();
+    if (!password) return;
+    setErr(''); setBusy(true);
+    try {
+      await axios.post(`${API}/auth/login`, { password });
+      onIn();
+    } catch (e2) {
+      setErr(e2.response?.data?.error || 'Could not reach the server.');
+      setPassword('');
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="login-wrap">
+      <form className="login-card" onSubmit={submit}>
+        <div className="logo"><span className="logo-mark" aria-hidden="true" />Financier</div>
+        <p className="sub">This portfolio is private. Enter your password to continue.</p>
+        <div className="field">
+          <label>Password</label>
+          <input type="password" value={password} autoFocus autoComplete="current-password"
+            onChange={(e) => setPassword(e.target.value)} />
+        </div>
+        {err && <div className="error-msg">{err}</div>}
+        <div className="modal-actions">
+          <button className="btn-primary" type="submit" disabled={busy || !password}>
+            {busy ? 'Checking…' : 'Unlock'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export default function App() {
+  // null = still checking, true = show the app, false = show the login screen.
+  const [authed, setAuthed] = useState(null);
+  useEffect(() => {
+    axios.get(`${API}/auth/status`)
+      .then((r) => setAuthed(!r.data.auth_required || r.data.authenticated))
+      .catch(() => setAuthed(false));
+  }, []);
+  // If a session expires while the app is open, any 401 bounces straight back to login.
+  useEffect(() => {
+    const id = axios.interceptors.response.use(
+      (r) => r,
+      (e) => { if (e.response?.status === 401) setAuthed(false); return Promise.reject(e); },
+    );
+    return () => axios.interceptors.response.eject(id);
+  }, []);
+
+  if (authed === null) return <div className="loading">Loading…</div>;
+  if (!authed) return <LoginScreen onIn={() => setAuthed(true)} />;
+  return <Financier onSignOut={() => setAuthed(false)} />;
+}
+
+function Financier({ onSignOut }) {
   const [tab, setTab] = useState('overview');
   const [view, setView] = useState({ name: 'list' }); // list | memo
   const [holdings, setHoldings] = useState([]);
@@ -179,7 +247,7 @@ export default function App() {
 
   return (
     <>
-      <Header summary={summary} tab={tab} setTab={(t) => { setTab(t); setView({ name: 'list' }); }} />
+      <Header summary={summary} tab={tab} onSignOut={onSignOut} setTab={(t) => { setTab(t); setView({ name: 'list' }); }} />
 
       <main className="main">
         {tab === 'overview' && <Overview />}
@@ -602,7 +670,11 @@ function JournalCard({ r, onOpen }) {
 }
 
 // ============================ HEADER ============================
-function Header({ summary, tab, setTab }) {
+function Header({ summary, tab, setTab, onSignOut }) {
+  const doSignOut = async () => {
+    try { await axios.post(`${API}/auth/logout`); } catch { /* clearing locally regardless */ }
+    onSignOut?.();
+  };
   const cash = summary?.cash_by_currency || {};
   const cashStr = Object.keys(cash).length
     ? Object.entries(cash).map(([c, v]) => `${v.toLocaleString()} ${c}`).join('  ·  ')
@@ -653,6 +725,7 @@ function Header({ summary, tab, setTab }) {
               Import
               <input type="file" accept="application/json,.json" onChange={doImport} style={{ display: 'none' }} />
             </label>
+            {onSignOut && <button className="data-btn" onClick={doSignOut} title="Sign out on this device">Lock</button>}
           </div>
           <nav className="nav">
             <button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>Overview</button>

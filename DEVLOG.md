@@ -13,6 +13,42 @@ To cut a new version: pick the number per the rules above, update `APP_VERSION` 
 
 ---
 
+## v2.10.0 — 2026-09-30 — Password login, single-origin serving, phone access
+The app can now be reached from your other devices. Everything here exists to make that
+safe, because until now the *only* thing protecting the data was that it refused
+connections from anywhere but the machine it ran on.
+### Added — access control
+- **Password login.** `FINANCIER_PASSWORD` in `server/.env` gates every `/api` route.
+  The session is an HMAC-signed, **httpOnly** cookie (30 days), so page scripts can't
+  read it; the signing secret is stored in a new `app_meta` table, so restarting the
+  server doesn't log your phone out. `SameSite=Lax`, and `Secure` added automatically
+  when actually served over HTTPS. Brute force is rate-limited (8 tries → 60s lockout),
+  and the password comparison is constant-time.
+- **A safety interlock:** the server **refuses to start** on a non-loopback address
+  unless a password is set, and says why. It is not possible to expose this app without
+  a login by accident.
+- Login screen and a **Lock** button in the header; a 401 anywhere (e.g. an expired
+  session) drops straight back to the login screen.
+### Changed
+- **The backend now serves the built frontend**, so it's one process on one port at one
+  URL instead of two terminals and two ports. This is what lets a single Tailscale
+  address work from any device.
+- **`API` is now the relative `/api`** instead of a hardcoded `http://127.0.0.1:8000`.
+  That hardcoded host was why the UI could only ever work on the machine running it.
+  Vite proxies `/api` in dev so the dev experience is unchanged.
+- **CORS locked down** — was `origin: () => cb(null, true)`, i.e. *any* website you had
+  open could read `/api/export` (your whole database) or POST `/api/import` (replace it)
+  in the background. Now an allowlist: loopback, `*.ts.net`, `100.x` tailnet addresses.
+- `npm start` loads `.env`; `npm run share` binds `0.0.0.0` for tailnet access.
+- Mobile layout: tables scroll rather than squash, header/nav/forms stack at ≤640px.
+### Notes
+- Verified end-to-end: unauthenticated `/api/holdings`, `/api/export` and `/api/import`
+  all return 401; forged and expired cookies rejected; hostile origin gets no CORS
+  header; login → reload → still in; Lock → logged out; checked at phone width.
+- The remaining v2.9.x work (price chart, timeseries FX conversion, import opening-price
+  solver, saver-accrual dedupe) is **still not in this repo** — it was built on a machine
+  that is no longer available and needs rebuilding.
+
 ## v2.8.1 — 2026-06-26 — Fix: average cost wrong after a sell
 ### Fixed
 - Average cost was computed as `total buy cost ÷ total buy shares` over ALL buys, so a

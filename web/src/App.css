@@ -883,10 +883,40 @@ tbody tr:hover td { background: var(--input); }
 }
 .loading { padding: 40px 28px; text-align: left; color: var(--muted); font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.08em; }
 
+/* ===================== LOGIN ===================== */
+.login-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg);
+}
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--rule);
+  padding: 32px 28px 24px;
+}
+.login-card .logo { margin-bottom: 10px; }
+.login-card .sub { margin-bottom: 20px; }
+.login-card .modal-actions { margin-top: 20px; }
+.login-card .btn-primary { width: 100%; }
+
 @media (max-width: 640px) {
   .main { padding: 18px 16px 32px; }
   .app-header { padding: 18px 16px; }
   .summary-strip { flex-direction: column; }
   .summary-item { border-right: none; border-bottom: 1px solid var(--border); }
   .summary-item:last-child { border-bottom: none; }
+  /* Tables are the widest thing here — let them scroll rather than squash the page. */
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .header-top { flex-direction: column; align-items: flex-start; gap: 12px; }
+  .header-right { width: 100%; flex-wrap: wrap; gap: 10px; }
+  .nav { flex-wrap: wrap; }
+  .overview-grid { grid-template-columns: 1fr; }
+  .field-row { flex-direction: column; }
+  .modal { max-height: 88vh; overflow-y: auto; }
 }

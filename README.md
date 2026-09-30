@@ -52,36 +52,75 @@ financier/
 
 ---
 
-## Running it locally
+## Running it
 
-Requires **Node.js 18+**.
+Requires **Node.js 20.6+** (uses `--env-file`).
 
-### 1. Backend
-
-```bash
-cd server
-npm install
-npm start
-```
-
-The API runs at `http://127.0.0.1:8000`. On first run it creates the database at
-`~/asset-tracker/tracker.db` and applies the schema. The schema auto-migrates on
-startup, so pulling a newer version never requires deleting the database.
-
-> Note: the backend binds `127.0.0.1` deliberately (not `localhost`), which on some
-> machines resolves to IPv6 and refuses connections.
-
-### 2. Frontend
-
-In a second terminal:
+### First time
 
 ```bash
-cd web
-npm install
-npm run dev
+cd server && npm install
+cd ../web && npm install && npm run build
 ```
 
-Open `http://localhost:5173`.
+Then copy `server/.env.example` to `server/.env` and set a password:
+
+```
+FINANCIER_PASSWORD=some-long-passphrase
+```
+
+### Every time
+
+```bash
+cd server && npm start
+```
+
+Open **http://127.0.0.1:8000**. That single command serves both the API and the UI —
+one process, one port, one URL.
+
+On first run it creates the database at `~/asset-tracker/tracker.db` and applies the
+schema. The schema auto-migrates on startup, so pulling a newer version never requires
+deleting the database.
+
+> The backend binds `127.0.0.1` deliberately (not `localhost`), which on some machines
+> resolves to IPv6 and refuses connections.
+
+### Developing the frontend
+
+For hot-reload while editing the UI, run the backend as above and, in a second terminal:
+
+```bash
+cd web && npm run dev
+```
+
+Open `http://localhost:5173`. Vite proxies `/api` to the backend, so the login session
+works exactly as it does in production.
+
+---
+
+## Access it from your phone (Tailscale)
+
+Financier stays on your own machine — Tailscale just builds a private network between
+your devices so you can reach it from your phone or laptop, anywhere, without exposing
+anything to the public internet. Free for personal use.
+
+1. Install Tailscale on **this Mac** and on **your phone**, and sign in to the same
+   account on both (https://tailscale.com/download).
+2. Find this Mac's name on your tailnet: `tailscale status` — it looks like
+   `your-macbook.tailXXXX.ts.net`.
+3. Start Financier listening beyond loopback:
+
+   ```bash
+   cd server && npm run share
+   ```
+
+4. On your phone, open `http://your-macbook.tailXXXX.ts.net:8000` and log in.
+
+**`npm run share` refuses to start without `FINANCIER_PASSWORD` set.** That is
+deliberate — the app holds your holdings, transactions and account references, and it
+must never be reachable from another device without a login in front of it.
+
+Your Mac has to be awake and running the server for the phone to reach it.
 
 ---
 
