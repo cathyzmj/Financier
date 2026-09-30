@@ -14,7 +14,7 @@ const API = '/api';
 axios.defaults.withCredentials = true;
 
 // Bump on each released change set (semver: MAJOR.MINOR.PATCH). Shown in the header.
-const APP_VERSION = '2.10.0';
+const APP_VERSION = '2.11.0';
 
 // Common Yahoo Finance exchange suffixes — offered as suggestions when editing an
 // IBKR import ticker (e.g. typing "2DG." suggests 2DG.MU, 2DG.F, …).
@@ -52,7 +52,7 @@ function addMonths(isoDate, months) {
   if (!isoDate || months == null) return '';
   const d = new Date(isoDate + 'T00:00:00');
   d.setMonth(d.getMonth() + months);
-  return d.toISOString().slice(0, 10);
+  return localIso(d); // local — toISOString() was a day early east of UTC
 }
 const EXIT_REASONS = ['TakeProfit', 'StopLoss', 'ThesisBroken', 'BetterOpp', 'Other'];
 const CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CNY', 'HKD', 'CHF', 'CAD', 'AUD', 'NZD', 'SGD', 'KRW', 'INR', 'TWD', 'THB', 'MYR', 'IDR', 'PHP', 'VND', 'AED', 'SAR', 'ZAR', 'BRL', 'MXN', 'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'HUF', 'TRY', 'RUB', 'ILS'];
@@ -68,6 +68,11 @@ const COUNTRY_FLAGS = {
 };
 
 // ---------- formatting helpers ----------
+// A Date as its LOCAL calendar day, YYYY-MM-DD. (toISOString() gives the UTC day,
+// which is still yesterday until 8am in China / 1am in UK summer — wrong for a date
+// a form defaults to, or for "which month am I looking at".)
+const localIso = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const fmtMoney = (n, cur = 'USD') =>
   n == null ? '—'
   : new Intl.NumberFormat('en-US', { style: 'currency', currency: cur, maximumFractionDigits: 2 }).format(n);
@@ -91,7 +96,7 @@ function exportCsv(filename, columns, rows) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${filename}-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.download = `${filename}-${localIso()}.csv`;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -315,11 +320,11 @@ function Overview() {
 
   useEffect(() => {
     setLoadingSeries(true);
-    axios.get(`${API}/overview/timeseries?period=${period}`)
+    axios.get(`${API}/overview/timeseries?period=${period}&base=${base}`)
       .then((r) => { setSeries(r.data.points || []); setWindowStart(r.data.window_start || null); })
       .catch(() => setSeries([]))
       .finally(() => setLoadingSeries(false));
-  }, [period]);
+  }, [period, base]);
 
   const baseSym = ({ GBP: '£', USD: '$', CNY: '¥', EUR: '€', HKD: 'HK$', JPY: '¥' }[base] || (base + ' '));
   const fmtBase = (n) => n == null ? '—' : `${baseSym}${Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
@@ -441,11 +446,11 @@ function Overview() {
                   tick={{ fontSize: 11, fontFamily: 'DM Mono, monospace' }}
                   stroke="#7a7268"
                   width={60}
-                  tickFormatter={(v) => metric === 'value' ? `$${(v / 1000).toFixed(0)}k` : `${v.toFixed(0)}%`}
+                  tickFormatter={(v) => metric === 'value' ? `${baseSym}${(v / 1000).toFixed(0)}k` : `${v.toFixed(0)}%`}
                   domain={metric === 'performance' ? ['auto', 'auto'] : ['auto', 'auto']}
                 />
                 <Tooltip
-                  formatter={(v) => metric === 'value' ? fmtMoney(v) : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`}
+                  formatter={(v) => metric === 'value' ? fmtBase(v) : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`}
                   labelStyle={{ fontFamily: 'DM Mono, monospace', fontSize: 12 }}
                 />
                 <Line
@@ -484,7 +489,7 @@ function journalMarkdown(rows) {
     : new Intl.NumberFormat('en-US', { style: 'currency', currency: c, maximumFractionDigits: 2 }).format(n));
   const open = rows.filter((r) => r.is_open);
   const closed = rows.filter((r) => !r.is_open);
-  const lines = ['# Financier — Investment Journal', '', `_Exported ${new Date().toISOString().slice(0, 10)}._`, ''];
+  const lines = ['# Financier — Investment Journal', '', `_Exported ${localIso()}._`, ''];
   const section = (title, list) => {
     lines.push(`## ${title}`, '');
     if (!list.length) { lines.push('_None._', ''); return; }
@@ -565,7 +570,7 @@ function Journal({ onOpen }) {
   };
   const downloadJson = async () => {
     const r = await axios.get(`${API}/journal/payload`);
-    downloadText(`financier-journal-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(r.data, null, 2));
+    downloadText(`financier-journal-${localIso()}.json`, JSON.stringify(r.data, null, 2));
   };
 
   return (
@@ -687,7 +692,7 @@ function Header({ summary, tab, setTab, onSignOut }) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `financier-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = `financier-backup-${localIso()}.json`;
       a.click();
       URL.revokeObjectURL(url);
     } catch {
@@ -880,23 +885,23 @@ function Portfolio({ holdings, loading, pnlMode, onTogglePnl, onAdd, onMemo, onT
               </tr>
             </thead>
             <tbody>
-              {sorted.map((h) => (
+              {sorted.map((h) => { const cur = h.quote_currency || h.currency || 'USD'; return (
                 <tr key={h.id}>
                   <td className="left"><span className="ticker">{h.ticker}</span></td>
                   <td className="left"><span className={`type-badge ${h.asset_type}`}>{h.asset_type === 'etf' ? 'ETF' : 'Stock'}</span></td>
                   <td className="left"><span className="sector-tag">{h.sector || '—'}</span></td>
                   <td className="num">{fmtNum(h.total_shares, h.total_shares % 1 === 0 ? 0 : 2)}</td>
-                  <td className="num">{fmtMoney(h.avg_cost)}</td>
-                  <td className="num">{fmtMoney(h.current_price)}</td>
-                  <td className="num">{fmtMoney(h.market_value)}</td>
+                  <td className="num">{fmtMoney(h.avg_cost, cur)}</td>
+                  <td className="num">{fmtMoney(h.current_price, cur)}</td>
+                  <td className="num">{fmtMoney(h.market_value, cur)}</td>
                   <td className={`num ${pnlClass(pnlMode === 'money' ? h.pnl : h.pnl_pct)}`}>
-                    {pnlMode === 'money' ? fmtMoney(h.pnl) : fmtPct(h.pnl_pct)}
+                    {pnlMode === 'money' ? fmtMoney(h.pnl, cur) : fmtPct(h.pnl_pct)}
                   </td>
                   <td>{h.target_price != null
-                    ? <span className="target-val">{fmtMoney(h.target_price)}</span>
+                    ? <span className="target-val">{fmtMoney(h.target_price, cur)}</span>
                     : <span className="unset">—</span>}</td>
                   <td>{h.stop_loss != null
-                    ? <span className="stop-val">{fmtMoney(h.stop_loss)}</span>
+                    ? <span className="stop-val">{fmtMoney(h.stop_loss, cur)}</span>
                     : <span className="unset">—</span>}</td>
                   <td className="left thesis-cell" title={h.thesis || ''}>{h.thesis || '—'}</td>
                   <td className="row-actions">
@@ -905,7 +910,7 @@ function Portfolio({ holdings, loading, pnlMode, onTogglePnl, onAdd, onMemo, onT
                     <button className="del" onClick={() => onDelete(h.id)}>✕</button>
                   </td>
                 </tr>
-              ))}
+              ); })}
             </tbody>
           </table>
         </div>
@@ -1421,11 +1426,11 @@ function BondModal({ existing, onClose, onSaved }) {
     name: existing.name || '', issuer: existing.issuer || '', bond_type: existing.bond_type || 'gilt',
     currency: existing.currency || 'GBP', face_value: existing.face_value ?? 100, quantity: existing.quantity ?? '',
     coupon_rate: existing.coupon_rate ?? '', frequency: existing.frequency ?? 2,
-    purchase_price: existing.purchase_price ?? '', purchase_date: existing.purchase_date || new Date().toISOString().slice(0, 10),
+    purchase_price: existing.purchase_price ?? '', purchase_date: existing.purchase_date || localIso(),
     maturity_date: existing.maturity_date || '', current_price: existing.current_price ?? '', notes: existing.notes || '',
   } : {
     name: '', issuer: '', bond_type: 'gilt', currency: 'GBP', face_value: 100, quantity: '',
-    coupon_rate: '', frequency: 2, purchase_price: '', purchase_date: new Date().toISOString().slice(0, 10),
+    coupon_rate: '', frequency: 2, purchase_price: '', purchase_date: localIso(),
     maturity_date: '', current_price: '', notes: '',
   });
   const [err, setErr] = useState('');
@@ -1593,7 +1598,7 @@ function StrategyPicker({ value, onChange, used = [] }) {
 function AddPositionModal({ onClose, onSaved }) {
   const [f, setF] = useState({
     ticker: '', name: '', asset_type: 'stock', currency: 'USD',
-    date: new Date().toISOString().slice(0, 10), price: '', shares: '',
+    date: localIso(), price: '', shares: '',
     thesis: '', sector: 'TMT', catalysts: '', target_price: '', stop_loss: '', conviction: '',
     time_horizon: '', tracks: '', expense_ratio: '', strategy: '',
   });
@@ -1861,7 +1866,7 @@ function TransactionsDrawer({ holding, onClose }) {
   const [data, setData] = useState(null);
   const [adding, setAdding] = useState(false);
   const [tx, setTx] = useState({
-    type: 'buy', date: new Date().toISOString().slice(0, 10), price: '', shares: '', notes: '',
+    type: 'buy', date: localIso(), price: '', shares: '', notes: '',
   });
   const [err, setErr] = useState('');
   const [closing, setClosing] = useState(null);          // { date, price } when a sell zeroed the position
@@ -1912,6 +1917,7 @@ function TransactionsDrawer({ holding, onClose }) {
   };
 
   const set = (k) => (e) => setTx({ ...tx, [k]: e.target.value });
+  const cur = holding.quote_currency || holding.currency || 'USD';
 
   return (
     <>
@@ -1931,7 +1937,7 @@ function TransactionsDrawer({ holding, onClose }) {
             </div>
             <div>
               <span className="mono">Weighted avg cost</span>
-              <div className="value">{fmtMoney(data.avg_cost)}</div>
+              <div className="value">{fmtMoney(data.avg_cost, cur)}</div>
             </div>
           </div>
         )}
@@ -2006,8 +2012,8 @@ function TransactionsDrawer({ holding, onClose }) {
             <span className={`tx-type ${t.type}`}>{t.type}</span>
             <span className="tx-date">{t.date}</span>
             <span className="tx-detail">
-              {fmtNum(t.shares, t.shares % 1 === 0 ? 0 : 2)} @ {fmtMoney(t.price)}<br />
-              <span className="mono">{fmtMoney(t.subtotal)}</span>
+              {fmtNum(t.shares, t.shares % 1 === 0 ? 0 : 2)} @ {fmtMoney(t.price, cur)}<br />
+              <span className="mono">{fmtMoney(t.subtotal, cur)}</span>
             </span>
             <button className="tx-del" onClick={() => delTx(t.id)}>✕</button>
           </div>
@@ -2018,6 +2024,119 @@ function TransactionsDrawer({ holding, onClose }) {
 }
 
 // ============================ MEMO PAGE ============================
+// Per-investment price line (Yahoo closes) with your buy/sell markers plotted at the
+// price you actually transacted — the position as a picture, next to the memo.
+const CHART_PERIODS = ['1M', '3M', '6M', '1Y', 'ALL'];
+function tradeMarker(color, up) {
+  return (props) => {
+    const { cx, cy, value } = props;
+    if (value == null || cx == null || cy == null) return null;
+    const d = up ? `M${cx},${cy - 6} L${cx - 5},${cy + 4} L${cx + 5},${cy + 4} Z`
+                 : `M${cx},${cy + 6} L${cx - 5},${cy - 4} L${cx + 5},${cy - 4} Z`;
+    return <path d={d} fill={color} stroke="#faf6ec" strokeWidth="1" />;
+  };
+}
+function PositionChart({ holdingId, ticker }) {
+  const [period, setPeriod] = useState('ALL');
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    setLoading(true);
+    axios.get(`${API}/holdings/${holdingId}/chart?period=${period}`)
+      .then((r) => setData(r.data)).catch(() => setData(null)).finally(() => setLoading(false));
+  }, [holdingId, period]);
+
+  const points = data?.points || [];
+  const merged = points.map((p) => ({ ...p, buy: null, sell: null }));
+  if (merged.length) {
+    const idxByDate = {};
+    merged.forEach((p, i) => { idxByDate[p.date] = i; });
+    const nearest = (date) => {
+      if (idxByDate[date] != null) return idxByDate[date];
+      let best = -1, bestDiff = Infinity;
+      for (let i = 0; i < merged.length; i++) {
+        const diff = Math.abs(new Date(merged[i].date) - new Date(date));
+        if (diff < bestDiff) { bestDiff = diff; best = i; }
+      }
+      return best;
+    };
+    // Only mark trades inside the charted window (±6 days for weekends/holidays).
+    // Without this, an older trade snaps onto the chart's first point and draws a
+    // marker at a price nowhere near the line there.
+    const PAD = 6 * 86400000;
+    const firstMs = new Date(merged[0].date).getTime() - PAD;
+    const lastMs = new Date(merged[merged.length - 1].date).getTime() + PAD;
+    for (const t of (data?.transactions || [])) {
+      const tMs = new Date(t.date).getTime();
+      if (tMs < firstMs || tMs > lastMs) continue;
+      const i = nearest(t.date);
+      if (i >= 0) merged[i][t.type === 'buy' ? 'buy' : 'sell'] = t.price;
+    }
+  }
+  const cur = data?.currency || 'USD';
+  const sym = ({ USD: '$', GBP: '£', EUR: '€', CNY: '¥', HKD: 'HK$', JPY: '¥' }[cur] || '');
+  const hasData = merged.length > 1;
+
+  return (
+    <div className="ov-card" style={{ marginBottom: 18 }}>
+      <div className="chart-head">
+        <span className="mono ov-card-label" style={{ marginBottom: 0 }}>{ticker} · price &amp; your trades</span>
+        <div className="metric-toggle">
+          {CHART_PERIODS.map((p) => (
+            <button key={p} className={period === p ? 'active' : ''} onClick={() => setPeriod(p)}>{p}</button>
+          ))}
+        </div>
+      </div>
+      {loading ? (
+        <div className="loading">Loading price history…</div>
+      ) : !hasData ? (
+        <div className="empty">No price history for this ticker / period.</div>
+      ) : (
+        <>
+          <ResponsiveContainer width="100%" height={260}>
+            <LineChart data={merged} margin={{ top: 10, right: 16, bottom: 0, left: 8 }}>
+              <CartesianGrid stroke="#d4cdc0" strokeDasharray="2 4" vertical={false} />
+              <XAxis dataKey="date" tick={{ fontSize: 11, fontFamily: 'DM Mono, monospace' }} tickFormatter={(d) => d.slice(5)} minTickGap={40} stroke="#7a7268" />
+              <YAxis tick={{ fontSize: 11, fontFamily: 'DM Mono, monospace' }} stroke="#7a7268" width={58} domain={['auto', 'auto']} tickFormatter={(v) => `${sym}${v}`} />
+              <Tooltip formatter={(v, n) => [`${sym}${Number(v).toFixed(2)}`, n]} labelStyle={{ fontFamily: 'DM Mono, monospace', fontSize: 12 }} />
+              <Line type="monotone" dataKey="close" stroke="#234e9c" strokeWidth={2} dot={false} name="price" isAnimationActive={false} />
+              <Line dataKey="buy" stroke="transparent" connectNulls={false} dot={tradeMarker('#1d6e3a', true)} activeDot={false} name="buy" isAnimationActive={false} />
+              <Line dataKey="sell" stroke="transparent" connectNulls={false} dot={tradeMarker('#a83030', false)} activeDot={false} name="sell" isAnimationActive={false} />
+            </LineChart>
+          </ResponsiveContainer>
+          <p className="ov-note"><span style={{ color: 'var(--positive)' }}>▲ buys</span> · <span style={{ color: 'var(--negative)' }}>▼ sells</span> — plotted at your transaction price.</p>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Hoisted OUT of MemoPage deliberately. Defined inline, this component's type was a new
+// function on every render, so React unmounted and remounted the input each keystroke —
+// the field lost focus after every character typed.
+function MemoField({ label, k, type = 'text', area, options, custom, memo, set }) {
+  return (
+    <div className="field">
+      <label>{label}</label>
+      {custom ? (
+        <>
+          <input list={`dl-${k}`} value={memo[k] ?? ''} onChange={set(k)} autoComplete="off" />
+          <datalist id={`dl-${k}`}>{(options || []).map((o) => <option key={o} value={o} />)}</datalist>
+        </>
+      ) : options ? (
+        <select value={memo[k] ?? ''} onChange={set(k)}>
+          <option value="">—</option>
+          {options.map((o) => <option key={o} value={o}>{o}</option>)}
+        </select>
+      ) : area ? (
+        <textarea value={memo[k] ?? ''} onChange={set(k)} />
+      ) : (
+        <input type={type} value={memo[k] ?? ''} onChange={set(k)} step={type === 'number' ? 'any' : undefined} />
+      )}
+    </div>
+  );
+}
+
 function MemoPage({ holding, onBack }) {
   const [memo, setMemo] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -2066,27 +2185,6 @@ function MemoPage({ holding, onBack }) {
     }
   };
 
-  const Field = ({ label, k, type = 'text', area, options, custom }) => (
-    <div className="field">
-      <label>{label}</label>
-      {custom ? (
-        <>
-          <input list={`dl-${k}`} value={memo[k] ?? ''} onChange={set(k)} autoComplete="off" />
-          <datalist id={`dl-${k}`}>{(options || []).map((o) => <option key={o} value={o} />)}</datalist>
-        </>
-      ) : options ? (
-        <select value={memo[k] ?? ''} onChange={set(k)}>
-          <option value="">—</option>
-          {options.map((o) => <option key={o} value={o}>{o}</option>)}
-        </select>
-      ) : area ? (
-        <textarea value={memo[k] ?? ''} onChange={set(k)} />
-      ) : (
-        <input type={type} value={memo[k] ?? ''} onChange={set(k)} step={type === 'number' ? 'any' : undefined} />
-      )}
-    </div>
-  );
-
   return (
     <div className="memo-page">
       <div className="memo-head">
@@ -2094,8 +2192,10 @@ function MemoPage({ holding, onBack }) {
         <h2>{holding.ticker} <span className="sector-tag">{memo.sector}</span></h2>
       </div>
 
+      <PositionChart holdingId={holding.id} ticker={holding.ticker} />
+
       <div className="memo-phase">Entry</div>
-      <Field label="Thesis (required)" k="thesis" area />
+      <MemoField memo={memo} set={set} label="Thesis (required)" k="thesis" area />
       <div className="thesis-history-bar">
         <button className="link-btn" onClick={() => setShowHistory((s) => !s)}>
           {showHistory ? 'hide thesis history' : `thesis history (${history.length})`}
@@ -2118,13 +2218,13 @@ function MemoPage({ holding, onBack }) {
       )}
       {holding.asset_type === 'etf' ? (
         <>
-          <Field label="Tracks" k="tracks" />
-          <Field label="Expense ratio %" k="expense_ratio" type="number" />
+          <MemoField memo={memo} set={set} label="Tracks" k="tracks" />
+          <MemoField memo={memo} set={set} label="Expense ratio %" k="expense_ratio" type="number" />
         </>
       ) : (
         <>
-          <Field label="Sector" k="sector" options={SECTORS} />
-          <Field label="Catalysts" k="catalysts" area />
+          <MemoField memo={memo} set={set} label="Sector" k="sector" options={SECTORS} />
+          <MemoField memo={memo} set={set} label="Catalysts" k="catalysts" area />
         </>
       )}
       <div className="field">
@@ -2132,32 +2232,32 @@ function MemoPage({ holding, onBack }) {
         <StrategyPicker value={memo.strategy || ''} onChange={(v) => setMemo({ ...memo, strategy: v })} used={usedStrategies} />
       </div>
       <div className="field-row">
-        <Field label="Target price" k="target_price" type="number" />
-        <Field label="Stop loss" k="stop_loss" type="number" />
+        <MemoField memo={memo} set={set} label="Target price" k="target_price" type="number" />
+        <MemoField memo={memo} set={set} label="Stop loss" k="stop_loss" type="number" />
       </div>
       <div className="field-row">
-        <Field label="Term" k="time_horizon" options={TERMS} />
-        <Field label="Conviction 1–5" k="conviction" type="number" />
-        <Field label="Position size %" k="position_size_pct" type="number" />
+        <MemoField memo={memo} set={set} label="Term" k="time_horizon" options={TERMS} />
+        <MemoField memo={memo} set={set} label="Conviction 1–5" k="conviction" type="number" />
+        <MemoField memo={memo} set={set} label="Position size %" k="position_size_pct" type="number" />
       </div>
 
       <div className="memo-phase">Context</div>
-      <Field label="Macro context" k="macro_context" area />
-      <Field label="Sector view" k="sector_view" area />
-      <Field label="Risk factors" k="risk_factors" area />
-      <Field label="Variant perception (your edge)" k="variant_perception" area />
+      <MemoField memo={memo} set={set} label="Macro context" k="macro_context" area />
+      <MemoField memo={memo} set={set} label="Sector view" k="sector_view" area />
+      <MemoField memo={memo} set={set} label="Risk factors" k="risk_factors" area />
+      <MemoField memo={memo} set={set} label="Variant perception (your edge)" k="variant_perception" area />
 
       <div className="memo-phase">Review</div>
-      <Field label="Thesis intact" k="thesis_intact" options={['Yes', 'Partially', 'No']} />
-      <Field label="Catalyst status" k="catalyst_status" area />
+      <MemoField memo={memo} set={set} label="Thesis intact" k="thesis_intact" options={['Yes', 'Partially', 'No']} />
+      <MemoField memo={memo} set={set} label="Catalyst status" k="catalyst_status" area />
 
       <div className="memo-phase">Exit</div>
       <div className="field-row">
-        <Field label="Exit date" k="exit_date" type="date" />
-        <Field label="Exit price" k="exit_price" type="number" />
-        <Field label="Exit reason" k="exit_reason" options={EXIT_REASONS} />
+        <MemoField memo={memo} set={set} label="Exit date" k="exit_date" type="date" />
+        <MemoField memo={memo} set={set} label="Exit price" k="exit_price" type="number" />
+        <MemoField memo={memo} set={set} label="Exit reason" k="exit_reason" options={EXIT_REASONS} />
       </div>
-      <Field label="Post-mortem" k="post_mortem" area />
+      <MemoField memo={memo} set={set} label="Post-mortem" k="post_mortem" area />
 
       {saveErr && <div className="error-msg">{saveErr}</div>}
       <div className="modal-actions">
@@ -2181,7 +2281,7 @@ function monthLabel(ym) {
 }
 
 function BudgetTab() {
-  const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [month, setMonth] = useState(localIso().slice(0, 7));
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [budgetInput, setBudgetInput] = useState('');
@@ -2232,7 +2332,7 @@ function BudgetTab() {
     spendByDay[d] = (spendByDay[d] || 0) + e.base_amount;
   });
   const today = new Date();
-  const isCurrentMonth = today.toISOString().slice(0, 7) === month;
+  const isCurrentMonth = localIso(today).slice(0, 7) === month;
   const todayDay = isCurrentMonth ? today.getDate() : daysInMonth;
   let cumulative = 0;
   const burnData = [];
@@ -2411,7 +2511,7 @@ function BudgetTab() {
 
 function AddExpenseModal({ baseCur, onClose, onSaved }) {
   const [f, setF] = useState({
-    date: new Date().toISOString().slice(0, 10), amount: '', currency: baseCur,
+    date: localIso(), amount: '', currency: baseCur,
     category: 'Food', wallet: 'Monzo', note: '',
   });
   const [err, setErr] = useState('');
@@ -2667,14 +2767,14 @@ function AddCashModal({ existing, onClose, onSaved }) {
     monthly_amount: existing.monthly_amount ?? '', term: existing.term || '',
     account_ref: existing.account_ref || '',
     balance: existing.balance ?? '', your_rate: existing.your_rate ?? '',
-    start_date: existing.start_date || new Date().toISOString().slice(0, 10),
+    start_date: existing.start_date || localIso(),
     maturity_date: existing.maturity_date || '', notes: existing.notes || '',
   } : {
     bank: 'HSBC', product: '', account_name: '', country: 'United Kingdom', currency: 'GBP',
     category: 'current', access_type: 'easy_access', is_isa: false, is_monthly_saver: false,
     monthly_amount: '', term: '', balance: '', your_rate: '',
     account_ref: '',
-    start_date: new Date().toISOString().slice(0, 10),
+    start_date: localIso(),
     maturity_date: '', notes: '',
   });
   const [err, setErr] = useState('');

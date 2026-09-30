@@ -883,6 +883,9 @@ tbody tr:hover td { background: var(--input); }
 }
 .loading { padding: 40px 28px; text-align: left; color: var(--muted); font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.08em; }
 
+/* Chart header: title left, period buttons right. */
+.chart-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+
 /* ===================== LOGIN ===================== */
 .login-wrap {
   min-height: 100vh;

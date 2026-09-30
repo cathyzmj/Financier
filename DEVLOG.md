@@ -13,6 +13,59 @@ To cut a new version: pick the number per the rules above, update `APP_VERSION` 
 
 ---
 
+## v2.11.0 — 2026-09-30 — Price chart + the correctness fixes (rebuilt v2.9 work)
+The v2.9.0/v2.9.1 work was built on a machine that became unavailable before it was ever
+pushed. This rebuilds it on top of v2.10.0. (Numbered 2.11 rather than 2.9 because it
+lands after 2.10 — version numbers don't go backwards.)
+### Added
+- **Per-investment price chart** on the memo page: the Yahoo close line with your
+  **▲ buy (green)** and **▼ sell (red)** markers plotted at the price you transacted.
+  Periods 1M / 3M / 6M / 1Y / ALL (ALL = since your first trade). Backend:
+  `GET /api/holdings/:id/chart?period=…`. Markers snap to the nearest trading day, and
+  only draw inside the charted window — otherwise an old trade snapped onto the chart's
+  edge and drew at a price nowhere near the line there.
+### Fixed — money
+- **The Overview value chart was summing currencies at 1:1.** A EUR-quoted holding was
+  added straight to USD ones. `/api/overview/timeseries` now takes `?base=` and converts
+  each holding at its FX rate; the chart follows the Net-worth base buttons, and its axis
+  and tooltip use that currency's symbol instead of a hardcoded `$`. Verified the same
+  window returns materially different totals for `base=GBP` vs `base=USD`.
+- **Broker-import opening price was wrong whenever the window contained a sell.** The old
+  `P*A − buyCost` is only valid without sells, because moving-average accounting removes
+  shares at the *running* average, which itself depends on the opening price. Replaced
+  with an exact solver: the replayed final average is linear in the opening price, so
+  evaluating at X=0 and X=1 inverts it precisely for any order of fills. Unit-tested
+  against four interleavings — the old formula was **$11–16/share** out; the new one is
+  exact to 1e-13.
+- **Monthly-saver accrual unified** into one helper used by `/api/cash`, `/api/summary`
+  and the allocation donut. An account edited into a saver counted *both* its stored
+  balance and its accrual; the header's Cash figure also ignored accruals entirely, so it
+  disagreed with the Banking tab. Verified: a saver with a stale £9,999 balance now
+  reports only its £3,000 accrual, in both places.
+- Investing table and transactions drawer formatted every price as `$` regardless of the
+  holding's currency.
+- A failed price lookup reported `currency: 'USD'`, which made `/api/summary` convert GBP
+  cost bases at 1:1. Now null, so callers fall back to the holding's own currency.
+- Flex imports could double-count a position when the query is set to lot-level detail
+  (a row per lot *plus* a summary row) — non-summary rows are now skipped.
+- Flex trade dates only parsed `20250420;…`, silently dropping fills in the
+  `2025-04-20;…` format; a row with an unparseable date now can't become a dateless
+  transaction.
+- Trading212 imports didn't normalise GBX (pence) to GBP, so LSE cost bases came in 100×.
+- `/api/cash/maturing?days=abc` produced `NaN`, which nullified the SQL date modifier.
+- Local-calendar dates throughout (`localDayIso` / `localIso`): "today", the default
+  expense month and export filenames used the UTC day, which is still yesterday until
+  8am in China. Yahoo's own timestamp conversion is deliberately left in UTC — it maps a
+  market trading day, not a user calendar day.
+### Fixed — UI
+- **The memo fields lost focus after every keystroke.** `Field` was defined inside
+  `MemoPage`, so its component type was a new function each render and React remounted
+  the input on every change. Hoisted to module level. Verified: 66 characters typed in
+  one go, all landed, field still focused.
+### Changed
+- Broker routes were defined *inside* `startServer()`; moved to module level so an
+  imported `app` always carries the full API.
+
 ## v2.10.0 — 2026-09-30 — Password login, single-origin serving, phone access
 The app can now be reached from your other devices. Everything here exists to make that
 safe, because until now the *only* thing protecting the data was that it refused

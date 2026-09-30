@@ -60,6 +60,13 @@ function netOpts() {
   return p ? { proxy: { host: p.host, port: p.port, protocol: 'http' } } : { httpsAgent: ipv4Agent };
 }
 
+// Format a Date as its LOCAL calendar day (YYYY-MM-DD). toISOString() gives the UTC
+// day, which is one day behind local until 8am in China (+8) and 1am in UK summer —
+// wrong for anything keyed to the user's own calendar (today's date, "this month").
+function localDayIso(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // DB path: Electron sets FINANCIER_DB_PATH to the app's userData dir. Standalone
 // dev falls back to ~/asset-tracker/tracker.db (unchanged behaviour).
@@ -317,7 +324,9 @@ async function getPrice(ticker) {
     return { ticker: t, price, currency, change_pct: changePct, cached: false };
   } catch (err) {
     if (cached) return { ticker: t, price: cached.price, currency: cached.currency, change_pct: cached.change_pct, cached: true, stale: true };
-    return { ticker: t, price: null, currency: 'USD', change_pct: null, error: err.message };
+    // currency null (not 'USD') so callers fall back to the holding's own currency —
+    // a hardcoded USD here made /api/summary convert GBP cost bases at 1:1.
+    return { ticker: t, price: null, currency: null, change_pct: null, error: err.message };
   }
 }
 
@@ -532,6 +541,36 @@ app.get('/api/holdings/:id/thesis-history', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// GET /api/holdings/:id/chart?period=1M|3M|6M|1Y|ALL — daily closes for one holding
+// plus its transactions, so the UI can plot your buys and sells on the price line.
+app.get('/api/holdings/:id/chart', async (req, res) => {
+  try {
+    const h = db.prepare('SELECT * FROM holdings WHERE id = ?').get(req.params.id);
+    if (!h) return res.status(404).json({ error: 'holding not found' });
+    const txns = db.prepare('SELECT type, date, price, shares FROM transactions WHERE holding_id = ? ORDER BY date ASC, id ASC').all(h.id);
+    const period = req.query.period || 'ALL';
+    const months = { '1M': 1, '3M': 3, '6M': 6, '1Y': 12 }[period];
+    const start = new Date();
+    if (months) {
+      start.setMonth(start.getMonth() - months);
+    } else { // ALL → from the earliest transaction, with a few days of lead-in
+      const earliest = txns.length ? txns[0].date : null;
+      if (earliest) {
+        start.setTime(new Date(earliest + 'T00:00:00').getTime());
+        start.setDate(start.getDate() - 5);
+      } else {
+        start.setMonth(start.getMonth() - 12);
+      }
+    }
+    start.setHours(0, 0, 0, 0);
+    const histMap = await getHistory(h.ticker, Math.floor(start.getTime() / 1000));
+    const points = Object.entries(histMap)
+      .map(([date, close]) => ({ date, close }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+    res.json({ ticker: h.ticker, currency: h.currency, period, points, transactions: txns });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // GET /api/strategies — distinct strategies you've already used, for suggestions
 app.get('/api/strategies', (req, res) => {
   try {
@@ -592,7 +631,7 @@ function daysBetween(a, b) {
 // Roll the rows into deterministic aggregates so the AI never has to (and can't)
 // invent numbers — it interprets, we compute. This is the machine-optimal payload.
 function buildAnalysisPayload(rows) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDayIso();
   const open = rows.filter((r) => r.is_open);
   const closed = rows.filter((r) => !r.is_open);
 
@@ -715,6 +754,31 @@ app.post('/api/journal/review', async (req, res) => {
 // Cash, Prices, Summary
 // =====================================================================
 
+// Monthly saver: how many payments have been made since start_date (the start month
+// counts as payment 1 once its day has passed), capped at the term length if fixed.
+// Single source of truth — /api/cash, /api/summary and the allocation donut all use it,
+// so the Banking tab and the header can't disagree about what a saver is worth.
+function saverMonthsPaid(startDateIso, term) {
+  const start = new Date(startDateIso + 'T00:00:00');
+  const now = new Date();
+  let months = (now.getFullYear() - start.getFullYear()) * 12 + (now.getMonth() - start.getMonth()) + 1;
+  if (now.getDate() < start.getDate()) months -= 1; // this month's payment hasn't happened yet
+  if (months < 0) months = 0;
+  const termMonths = { '1yr': 12, '2yr': 24, '3yr': 36, '5yr': 60 }[term];
+  return termMonths ? Math.min(months, termMonths) : months;
+}
+const isAccruingSaver = (r) => r.is_monthly_saver && r.monthly_amount && r.start_date;
+// Cash by currency, with savers valued at their accrued amount INSTEAD of their stored
+// balance — counting both double-counts an account that was later edited into a saver.
+function cashByCurrencyAccrued() {
+  const byCur = {};
+  for (const r of db.prepare('SELECT * FROM cash_accounts').all()) {
+    const v = isAccruingSaver(r) ? saverMonthsPaid(r.start_date, r.term) * r.monthly_amount : r.balance;
+    byCur[r.currency] = (byCur[r.currency] || 0) + (v || 0);
+  }
+  return byCur;
+}
+
 // GET /api/cash — grouped by country
 app.get('/api/cash', (req, res) => {
   try {
@@ -722,18 +786,9 @@ app.get('/api/cash', (req, res) => {
     const grouped = {};
     for (const r of rows) {
       // Monthly saver: balance accrues monthly_amount each month from start_date.
-      // We compute a derived "accrued_balance" (number of payments made × monthly_amount,
-      // capped at the term length if a fixed term is set), but keep the stored balance too.
-      if (r.is_monthly_saver && r.monthly_amount && r.start_date) {
-        const start = new Date(r.start_date + 'T00:00:00');
-        const now = new Date();
-        let months = (now.getFullYear() - start.getFullYear()) * 12 + (now.getMonth() - start.getMonth());
-        // count the start month itself as payment 1 if the day has passed
-        months = months + 1;
-        if (months < 0) months = 0;
-        // cap at term (e.g. 12 for a 1-year saver) if known
-        const termMonths = { '1yr': 12, '2yr': 24, '3yr': 36, '5yr': 60 }[r.term];
-        if (termMonths) months = Math.min(months, termMonths);
+      // Derived "accrued_balance" (payments made × monthly_amount); stored balance kept too.
+      if (isAccruingSaver(r)) {
+        const months = saverMonthsPaid(r.start_date, r.term);
         r.payments_made = months;
         r.accrued_balance = Math.round(months * r.monthly_amount * 100) / 100;
       }
@@ -814,7 +869,8 @@ app.post('/api/cash/refresh-rates', async (req, res) => {
 // GET /api/cash/maturing?days=7
 app.get('/api/cash/maturing', (req, res) => {
   try {
-    const days = parseInt(req.query.days ?? '7', 10);
+    const parsed = parseInt(req.query.days ?? '7', 10);
+    const days = Number.isFinite(parsed) ? parsed : 7; // NaN would nullify the SQL modifier
     const rows = db.prepare(`
       SELECT * FROM cash_accounts
       WHERE maturity_date IS NOT NULL
@@ -873,10 +929,9 @@ app.get('/api/summary', async (req, res) => {
       costBasisTotal += h.cost_basis * rate;
       if (h.pnl != null) pnl += h.pnl * rate;
     }
-    // Cash totals stay in native currency, grouped — no FX conversion (private/local, manual).
-    const cashRows = db.prepare('SELECT currency, SUM(balance) AS total FROM cash_accounts GROUP BY currency').all();
-    const cashByCurrency = {};
-    for (const c of cashRows) cashByCurrency[c.currency] = c.total;
+    // Cash totals stay in native currency, grouped — no FX conversion (private/local,
+    // manual). Savers count at their accrued amount, same as the Banking tab shows.
+    const cashByCurrency = cashByCurrencyAccrued();
 
     const pnlPct = costBasisTotal > 0 ? (pnl / costBasisTotal) * 100 : null;
 
@@ -963,19 +1018,7 @@ app.get('/api/overview/allocation', async (req, res) => {
     }
 
     // Bank accounts grouped by currency, converted to base.
-    const acctRows = db.prepare('SELECT currency, SUM(balance) AS total FROM cash_accounts GROUP BY currency').all();
-    // Monthly savers store balance=0; add their accrued amounts.
-    const savers = db.prepare("SELECT currency, monthly_amount, term, start_date FROM cash_accounts WHERE is_monthly_saver = 1 AND monthly_amount IS NOT NULL AND start_date IS NOT NULL").all();
-    const acctByCur = {};
-    for (const r of acctRows) acctByCur[r.currency] = (acctByCur[r.currency] || 0) + r.total;
-    for (const s of savers) {
-      const start = new Date(s.start_date + 'T00:00:00'); const now = new Date();
-      let m = (now.getFullYear() - start.getFullYear()) * 12 + (now.getMonth() - start.getMonth()) + 1;
-      if (m < 0) m = 0;
-      const termMonths = { '1yr': 12, '2yr': 24, '3yr': 36, '5yr': 60 }[s.term];
-      if (termMonths) m = Math.min(m, termMonths);
-      acctByCur[s.currency] = (acctByCur[s.currency] || 0) + m * s.monthly_amount;
-    }
+    const acctByCur = cashByCurrencyAccrued();
     const bankSlices = [];
     let bankTotal = 0;
     for (const [cur, total] of Object.entries(acctByCur)) {
@@ -1006,16 +1049,22 @@ app.get('/api/overview/timeseries', async (req, res) => {
     const start = periodStart(period);
     const period1 = Math.floor(start.getTime() / 1000);
 
-    const windowStart = start.toISOString().slice(0, 10);
+    const base = (req.query.base || 'USD').toUpperCase();
+    const windowStart = localDayIso(start);
     const holdings = db.prepare('SELECT * FROM holdings').all();
-    if (holdings.length === 0) return res.json({ period, window_start: windowStart, points: [] });
+    if (holdings.length === 0) return res.json({ period, base, window_start: windowStart, points: [] });
 
-    // Fetch historical closes + all transactions for every holding.
+    // Fetch historical closes + transactions + an FX rate to base for every holding.
+    // Without the rate this loop summed raw numbers across currencies — a EUR-quoted
+    // holding was added to USD ones at 1:1, silently inflating the whole chart.
     const histByHolding = {};
     const txByHolding = {};
+    const fxByHolding = {};
     await Promise.all(holdings.map(async (h) => {
       histByHolding[h.id] = await getHistory(h.ticker, period1);
       txByHolding[h.id] = db.prepare('SELECT * FROM transactions WHERE holding_id = ? ORDER BY date ASC').all(h.id);
+      const fx = await getFxRate(h.currency || base, base);
+      fxByHolding[h.id] = fx.rate; // null if the rate couldn't be fetched
     }));
 
     // Walk each calendar day in the window. For each holding, compute shares held
@@ -1025,7 +1074,7 @@ app.get('/api/overview/timeseries', async (req, res) => {
     const points = [];
     const today = new Date(); today.setHours(0, 0, 0, 0);
     for (let day = new Date(start); day <= today; day.setDate(day.getDate() + 1)) {
-      const iso = day.toISOString().slice(0, 10);
+      const iso = localDayIso(day);
       let value = 0, costBasis = 0, priced = false;
 
       for (const h of holdings) {
@@ -1039,8 +1088,11 @@ app.get('/api/overview/timeseries', async (req, res) => {
         const px = close ?? lastClose[h.id];
         if (px == null) continue;
 
-        value += shares * px;
-        costBasis += cb;
+        const rate = fxByHolding[h.id];
+        if (rate == null) continue; // no FX rate — omitting beats mis-summing
+
+        value += shares * px * rate;
+        costBasis += cb * rate;
         priced = true;
       }
 
@@ -1054,7 +1106,7 @@ app.get('/api/overview/timeseries', async (req, res) => {
       });
     }
 
-    res.json({ period, window_start: windowStart, points });
+    res.json({ period, base, window_start: windowStart, points });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1126,7 +1178,7 @@ app.patch('/api/budget/settings', (req, res) => {
 // GET /api/expenses?month=YYYY-MM — expenses for a month + category & spend totals in base currency
 app.get('/api/expenses', async (req, res) => {
   try {
-    const month = req.query.month || new Date().toISOString().slice(0, 7);
+    const month = req.query.month || localDayIso().slice(0, 7); // local month, not UTC
     const settings = db.prepare('SELECT * FROM budget_settings WHERE id = 1').get()
       || { monthly_budget: 0, base_currency: 'GBP' };
     const base = settings.base_currency;
@@ -1204,7 +1256,7 @@ app.get('/api/export', (req, res) => {
       dump.tables[t] = db.prepare(`SELECT * FROM ${t}`).all();
     }
     res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Content-Disposition', `attachment; filename="financier-backup-${new Date().toISOString().slice(0, 10)}.json"`);
+    res.setHeader('Content-Disposition', `attachment; filename="financier-backup-${localDayIso()}.json"`);
     res.send(JSON.stringify(dump, null, 2));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1346,9 +1398,6 @@ app.delete('/api/bonds/:id', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Start the server only when run directly (node server.js), not when imported
-// by the Electron main process (which calls startServer itself).
-export function startServer() {
 // ---- IBKR Flex Web Service ----
 // Two-step protocol: (1) SendRequest with token+queryId returns a ReferenceCode;
 // (2) GetStatement with token+ReferenceCode returns the report XML.
@@ -1389,6 +1438,10 @@ function parseFlexPositions(xml) {
   const rows = xml.match(/<OpenPosition\b[^>]*\/>/g) || [];
   const positions = [];
   for (const row of rows) {
+    // A Flex query set to lot-level detail emits one row per LOT plus a SUMMARY row
+    // per symbol — importing both would double-count the position.
+    const lod = (flexAttr(row, 'levelOfDetail') || '').toUpperCase();
+    if (lod && lod !== 'SUMMARY') continue;
     const symbol = flexAttr(row, 'symbol');
     const qty = parseFloat(flexAttr(row, 'position'));
     if (!symbol || !qty) continue;
@@ -1423,8 +1476,10 @@ function parseFlexTrades(xml) {
     const price = parseFloat(flexAttr(row, 'tradePrice'));
     const side = (flexAttr(row, 'buySell') || '').toUpperCase();
     const dt = flexAttr(row, 'dateTime') || flexAttr(row, 'tradeDate') || '';
-    const date = dt.slice(0, 8).replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3'); // YYYY-MM-DD
-    if (!symbol || !qty || Number.isNaN(price) || !(side === 'BUY' || side === 'SELL')) continue;
+    // Accept both Flex date formats: "20250420;093000" and "2025-04-20;09:30:00".
+    const dm = dt.match(/^(\d{4})-?(\d{2})-?(\d{2})/);
+    const date = dm ? `${dm[1]}-${dm[2]}-${dm[3]}` : '';
+    if (!symbol || !qty || !date || Number.isNaN(price) || !(side === 'BUY' || side === 'SELL')) continue;
     trades.push({ symbol: symbol.toUpperCase(), date, type: side === 'BUY' ? 'buy' : 'sell', shares: qty, price });
   }
   return trades;
@@ -1433,6 +1488,30 @@ function parseFlexTrades(xml) {
 // Build a transaction list for one position by combining its in-window trades with the
 // Open Positions baseline. Trades give the granular fills; if the position predates the
 // window, one synthetic "opening" buy reconciles the remainder to IBKR's average cost.
+// Solve the synthetic opening price so the imported position reproduces the broker's
+// average cost exactly.
+//
+// The naive "P*A − buyCost" is only right when the window has no sells. With a sell,
+// moving-average accounting removes shares at the *running* average, which itself
+// depends on the opening price — so that formula drifts (measured $11–16/share off in
+// the test cases below). But replaying the fills is a LINEAR function of the opening
+// price X: buys add constants to cost, sells scale it. So evaluating the replay at
+// X=0 and X=1 pins the line and inverts it exactly, for any order of buys and sells.
+function solveOpeningPrice(openingQ, fills, targetAvg) {
+  const finalAvg = (X) => {
+    let shares = openingQ, cost = openingQ * X;
+    for (const f of fills) {
+      if (f.type === 'buy') { cost += f.price * f.shares; shares += f.shares; }
+      else { const avg = shares > 0 ? cost / shares : 0; shares -= f.shares; cost = shares > 0.0000001 ? avg * shares : 0; }
+    }
+    return shares > 0.0000001 ? cost / shares : null;
+  };
+  const f0 = finalAvg(0), f1 = finalAvg(1);
+  // Degenerate: the opening shares were entirely sold inside the window, so the final
+  // average carries no information about X. Caller falls back.
+  if (f0 == null || f1 == null || Math.abs(f1 - f0) < 1e-9) return null;
+  return (targetAvg - f0) / (f1 - f0);
+}
 function buildPositionTxns(openPos, trades, windowStartIso, label = 'IBKR') {
   const fills = trades
     .filter((t) => t.symbol === openPos.symbol.toUpperCase())
@@ -1449,8 +1528,9 @@ function buildPositionTxns(openPos, trades, windowStartIso, label = 'IBKR') {
   // whole position when there are no fills at all (e.g. Trading212 positions).
   const openingQ = Math.round((P - (buyQ - sellQ)) * 1e6) / 1e6;
   if (openingQ > 0.0001 && A != null) {
-    const openingCost = P * A - buyCost;             // remainder of the cost basis
-    const openingPrice = openingCost > 0 ? openingCost / openingQ : A;
+    const solved = solveOpeningPrice(openingQ, fills, A);
+    const openingPrice = (solved != null && solved > 0) ? solved
+      : (P * A - buyCost > 0 ? (P * A - buyCost) / openingQ : A); // degenerate — best effort
     txns.push({ type: 'buy', date: openPos.opening_date || windowStartIso,
       price: Math.round(openingPrice * 1e6) / 1e6, shares: openingQ,
       notes: `Opening position (average cost) — ${label}` });
@@ -1465,7 +1545,7 @@ function buildPositionTxns(openPos, trades, windowStartIso, label = 'IBKR') {
 function importSelections(selections, positions, trades, windowStartIso, label) {
   const bySymbol = new Map(positions.map((p) => [p.symbol.toUpperCase(), p]));
   const existing = new Map(db.prepare('SELECT id, ticker FROM holdings').all().map((h) => [h.ticker.toUpperCase(), h.id]));
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDayIso();
   let added = 0, resynced = 0; const skipped = []; const errors = [];
   const insertTxn = db.prepare(`INSERT INTO transactions (holding_id, type, date, price, shares, notes) VALUES (?, ?, ?, ?, ?, ?)`);
   const tx = db.transaction(() => {
@@ -1583,7 +1663,7 @@ app.post('/api/ibkr/sync', async (req, res) => {
     const positions = parseFlexPositions(xml);
     const trades = parseFlexTrades(xml);
     const m = xml.match(/<FlexStatement\b[^>]*\bfromDate="(\d{4})(\d{2})(\d{2})"/);
-    const windowStartIso = m ? `${m[1]}-${m[2]}-${m[3]}` : new Date().toISOString().slice(0, 10);
+    const windowStartIso = m ? `${m[1]}-${m[2]}-${m[3]}` : localDayIso();
     res.json(importSelections(selections, positions, trades, windowStartIso, 'IBKR'));
   } catch (err) {
     res.status(502).json({ error: err.message });
@@ -1630,13 +1710,20 @@ async function fetchT212Positions(base, apiKey) {
   return rows.map((r) => {
     const meta = instruments.get(r.ticker) || {};
     const bare = String(meta.shortName || String(r.ticker).split('_')[0] || r.ticker).toUpperCase();
-    const currency = meta.currencyCode || 'USD';
+    let currency = meta.currencyCode || 'USD';
+    let costPrice = r.averagePrice != null ? r.averagePrice : null;
+    // T212 quotes LSE instruments in GBX (pence). Normalise to GBP so the imported
+    // cost basis matches the GBp→GBP-normalised Yahoo prices.
+    if (currency === 'GBX' || currency === 'GBp') {
+      if (costPrice != null) costPrice = costPrice / 100;
+      currency = 'GBP';
+    }
     const type = String(meta.type || '').toUpperCase() === 'ETF' ? 'etf' : 'stock';
     return {
       symbol: bare,
       name: meta.name || null,
       quantity: r.quantity,
-      cost_price: r.averagePrice != null ? r.averagePrice : null,
+      cost_price: costPrice,
       currency,
       listing_exchange: null,
       yahoo_symbol: yahooSymbol(bare, null, currency),
@@ -1671,7 +1758,7 @@ app.post('/api/t212/sync', async (req, res) => {
     const selections = Array.isArray(req.body?.selections) ? req.body.selections : null;
     if (!selections || selections.length === 0) return res.status(400).json({ error: 'No positions selected to import.' });
     const positions = await fetchT212Positions(t212Base(env), apiKey);
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDayIso();
     res.json(importSelections(selections, positions, [], today, 'Trading212'));
   } catch (err) {
     res.status(502).json({ error: t212Err(err) });
@@ -1689,6 +1776,10 @@ if (fs.existsSync(path.join(WEB_DIR, 'index.html'))) {
   app.get(/^(?!\/api\/).*/, (req, res) => res.sendFile(path.join(WEB_DIR, 'index.html')));
 }
 
+// Start the server only when run directly (node server.js), not when imported by a
+// test or an Electron main process. Every route is registered at module level above,
+// so an imported `app` always carries the full API and this can't double-register them.
+export function startServer() {
   return app.listen(PORT, HOST, () => {
     const shown = HOST === '0.0.0.0' ? 'localhost' : HOST;
     console.log(`Financier running at http://${shown}:${PORT}`);
