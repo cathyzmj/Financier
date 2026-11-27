@@ -3,6 +3,7 @@ import axios from 'axios';
 import {
   PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
   LineChart, Line, XAxis, YAxis, CartesianGrid,
+  AreaChart, Area, BarChart, Bar, Legend,
 } from 'recharts';
 import './App.css';
 
@@ -14,7 +15,7 @@ const API = '/api';
 axios.defaults.withCredentials = true;
 
 // Bump on each released change set (semver: MAJOR.MINOR.PATCH). Shown in the header.
-const APP_VERSION = '2.11.0';
+const APP_VERSION = '2.13.0';
 
 // Common Yahoo Finance exchange suffixes — offered as suggestions when editing an
 // IBKR import ticker (e.g. typing "2DG." suggests 2DG.MU, 2DG.F, …).
@@ -256,6 +257,7 @@ function Financier({ onSignOut }) {
 
       <main className="main">
         {tab === 'overview' && <Overview />}
+        {tab === 'signals' && <Signals />}
 
         {tab === 'investing' && view.name === 'list' && (
           <Portfolio
@@ -734,6 +736,7 @@ function Header({ summary, tab, setTab, onSignOut }) {
           </div>
           <nav className="nav">
             <button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>Overview</button>
+            <button className={tab === 'signals' ? 'active' : ''} onClick={() => setTab('signals')}>Signals</button>
             <button className={tab === 'investing' ? 'active' : ''} onClick={() => setTab('investing')}>Investing</button>
             <button className={tab === 'banking' ? 'active' : ''} onClick={() => setTab('banking')}>Banking</button>
             <button className={tab === 'journal' ? 'active' : ''} onClick={() => setTab('journal')}>Journal</button>
@@ -2266,6 +2269,539 @@ function MemoPage({ holding, onBack }) {
         </button>
       </div>
     </div>
+  );
+}
+
+// ============================ MARKET SIGNALS ============================
+// The observation half of the app. Nothing on these screens is ever typed in: every
+// number arrives from a feed, which is the whole point — a dashboard that needs upkeep
+// is a dashboard that goes stale.
+const SIGNAL_SUBS = [
+  { key: 'fear', label: 'Fear & greed' },
+  { key: 'risk', label: 'Risk' },
+  { key: 'rates', label: 'Rates' },
+  { key: 'macro', label: 'Macro' },
+  { key: 'venture', label: 'Venture map' },
+];
+const SIGNAL_PERIODS = ['3M', '1Y', '3Y', 'ALL'];
+
+// Fear is brick, greed is cobalt. Green and red stay reserved for P&L, so a market
+// mood can never be mistaken for money you have made or lost.
+const FEAR_ZONES = [
+  { to: 20, label: 'Extreme fear', color: '#8f2d14' },
+  { to: 40, label: 'Fear', color: '#c8431f' },
+  { to: 60, label: 'Neutral', color: '#8a7f68' },
+  { to: 80, label: 'Greed', color: '#3f6fc4' },
+  { to: 100, label: 'Extreme greed', color: '#234e9c' },
+];
+function fearColor(score) {
+  if (score == null) return 'var(--muted)';
+  return (FEAR_ZONES.find((z) => score < z.to) || FEAR_ZONES[FEAR_ZONES.length - 1]).color;
+}
+
+function fmtSignal(v, unit, decimals = 2) {
+  if (v == null || !Number.isFinite(Number(v))) return '—';
+  const n = Number(v);
+  // Index levels in the thousands read better grouped; everything else is a plain number
+  // at the precision the metric actually carries.
+  const body = Math.abs(n) >= 1000
+    ? n.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
+    : n.toFixed(decimals);
+  return unit === 'pct' ? `${body}%` : body;
+}
+
+function fmtDelta(d, unit, decimals = 2) {
+  if (!d || !Number.isFinite(Number(d.abs))) return null;
+  const n = Number(d.abs);
+  const sign = n > 0 ? '▲' : n < 0 ? '▼' : '·';
+  return `${sign} ${fmtSignal(Math.abs(n), unit, decimals)}`;
+}
+
+function fmtAgo(ts) {
+  if (!ts) return 'never';
+  const mins = Math.round((Date.now() - ts) / 60000);
+  if (mins < 2) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.round(hrs / 24)}d ago`;
+}
+
+// Axis-free sparkline. Deliberately unlabelled: the tile's job is the shape and the
+// number, and a chart small enough to fit a tile cannot carry readable axes honestly.
+function SignalSpark({ points, color }) {
+  if (!points || points.length < 2) return <div className="sig-spark" />;
+  return (
+    <div className="sig-spark">
+      <ResponsiveContainer width="100%" height={34}>
+        <LineChart data={points} margin={{ top: 3, right: 1, bottom: 3, left: 1 }}>
+          <YAxis hide domain={['dataMin', 'dataMax']} />
+          <Line type="monotone" dataKey="value" stroke={color} strokeWidth={1.5} dot={false} isAnimationActive={false} />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function SignalTile({ m, active, onOpen }) {
+  // The 30-day delta is shown in a neutral colour on purpose. A rising VIX is bad and a
+  // rising S&P is good, and the tile has no business pretending to know which is which.
+  const delta = fmtDelta(m.d30, m.unit, m.decimals);
+  return (
+    <button className={`sig-tile ${active ? 'active' : ''}`} onClick={() => onOpen(m.key)}>
+      <span className="sig-tile-label">{m.label}</span>
+      <span className="sig-tile-value mono">{fmtSignal(m.value, m.unit, m.decimals)}</span>
+      <span className="sig-tile-delta mono">{delta ? `${delta} · 30d` : 'no history yet'}</span>
+      <SignalSpark points={m.points} color="#234e9c" />
+      <span className="sig-tile-blurb">{m.blurb}</span>
+      <span className="sig-tile-asof mono">{m.as_of || '—'}</span>
+    </button>
+  );
+}
+
+// Full-history chart for one metric, opened by clicking its tile. Rendered above the
+// grid rather than in a modal so a metric can be read with its neighbours still in view.
+function MetricChart({ metricKey, onClose }) {
+  const [period, setPeriod] = useState('1Y');
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    axios.get(`${API}/signals/series/${metricKey}?period=${period}`)
+      .then((r) => { if (live) setData(r.data); })
+      .catch(() => { if (live) setData(null); })
+      .finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
+  }, [metricKey, period]);
+
+  const pts = data?.points || [];
+  return (
+    <div className="ov-card sig-detail">
+      <div className="chart-head">
+        <span className="mono ov-card-label" style={{ marginBottom: 0 }}>
+          {data?.label || metricKey}{data?.source_id ? ` · FRED ${data.source_id}` : ''}
+        </span>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <div className="metric-toggle">
+            {SIGNAL_PERIODS.map((p) => (
+              <button key={p} className={period === p ? 'active' : ''} onClick={() => setPeriod(p)}>{p}</button>
+            ))}
+          </div>
+          <button className="sig-close" onClick={onClose} aria-label="Close chart">✕</button>
+        </div>
+      </div>
+      {loading ? <div className="loading">Loading history…</div>
+        : pts.length < 2 ? <div className="empty">No history for this metric yet.</div> : (
+          <>
+            <ResponsiveContainer width="100%" height={240}>
+              <LineChart data={pts} margin={{ top: 8, right: 16, bottom: 0, left: 4 }}>
+                <CartesianGrid stroke="#d4cdc0" strokeDasharray="2 4" vertical={false} />
+                <XAxis dataKey="date" tick={{ fontSize: 11, fontFamily: 'DM Mono, monospace' }} minTickGap={48} stroke="#7a7268" />
+                <YAxis tick={{ fontSize: 11, fontFamily: 'DM Mono, monospace' }} stroke="#7a7268" width={62} domain={['auto', 'auto']} />
+                <Tooltip formatter={(v) => fmtSignal(v, data.unit, data.decimals)} labelStyle={{ fontFamily: 'DM Mono, monospace', fontSize: 12 }} />
+                <Line type="monotone" dataKey="value" stroke="#234e9c" strokeWidth={2} dot={false} isAnimationActive={false} name={data.label} />
+              </LineChart>
+            </ResponsiveContainer>
+            <p className="ov-note">{data.blurb}</p>
+          </>
+        )}
+    </div>
+  );
+}
+
+function SignalGroup({ list, note }) {
+  const [open, setOpen] = useState(null);
+  if (!list?.length) return <div className="empty">Nothing fetched for this group yet.</div>;
+  return (
+    <>
+      {open && <MetricChart metricKey={open} onClose={() => setOpen(null)} />}
+      <div className="sig-grid">
+        {list.map((m) => (
+          <SignalTile key={m.key} m={m} active={open === m.key} onOpen={(k) => setOpen(open === k ? null : k)} />
+        ))}
+      </div>
+      {note && <p className="ov-note">{note}</p>}
+    </>
+  );
+}
+
+// ---- the composite ----------------------------------------------------------
+function FearBand({ score }) {
+  return (
+    <div className="fear-band-wrap">
+      <div className="fear-band">
+        {FEAR_ZONES.map((z, i) => {
+          const from = i === 0 ? 0 : FEAR_ZONES[i - 1].to;
+          return <span key={z.label} style={{ width: `${z.to - from}%`, background: z.color }} title={z.label} />;
+        })}
+        {score != null && <span className="fear-marker" style={{ left: `${Math.max(0, Math.min(100, score))}%` }} />}
+      </div>
+      <div className="fear-scale mono">
+        <span>0 · extreme fear</span><span>50 · neutral</span><span>100 · extreme greed</span>
+      </div>
+    </div>
+  );
+}
+
+function FearPanel({ fear }) {
+  const [period, setPeriod] = useState('1Y');
+  const [hist, setHist] = useState(null);
+  useEffect(() => {
+    let live = true;
+    axios.get(`${API}/signals/series/fear_index?period=${period}`)
+      .then((r) => { if (live) setHist(r.data.points || []); })
+      .catch(() => { if (live) setHist([]); });
+    return () => { live = false; };
+  }, [period]);
+
+  if (!fear) return <div className="empty">The composite has not been computed yet.</div>;
+  const score = fear.value;
+  const parts = fear.breakdown?.parts || [];
+
+  return (
+    <>
+      <div className="ov-card fear-head">
+        <div className="fear-score-col">
+          <span className="mono ov-card-label">Fear &amp; Greed · as of {fear.as_of || '—'}</span>
+          <span className="fear-score" style={{ color: fearColor(score) }}>{score == null ? '—' : Math.round(score)}</span>
+          <span className="fear-label" style={{ color: fearColor(score) }}>{fear.label_text}</span>
+          <span className="fear-compare mono">
+            30 days ago {fear.d30 ? Math.round(fear.d30.from) : '—'} · a year ago {fear.d365 ? Math.round(fear.d365.from) : '—'}
+          </span>
+        </div>
+        <div className="fear-band-col">
+          <FearBand score={score} />
+          <p className="ov-note" style={{ marginTop: 16 }}>
+            Each component below is ranked against its <strong>own trailing year</strong>, then averaged.
+            So this is a reading relative to the last twelve months, not an absolute one: a calm year
+            makes an ordinary wobble look extreme. {parts.length} of 7 components are reporting.
+          </p>
+        </div>
+      </div>
+
+      <div className="ov-card">
+        <span className="mono ov-card-label">What is driving it</span>
+        <div className="fear-parts">
+          {parts.map((p) => (
+            <div key={p.key} className="fear-part">
+              <span className="fear-part-label">{p.label}</span>
+              <div className="fear-part-bar">
+                <span style={{ width: `${Math.max(1, Math.min(100, p.score))}%`, background: fearColor(p.score) }} />
+              </div>
+              <span className="fear-part-score mono" style={{ color: fearColor(p.score) }}>{Math.round(p.score)}</span>
+              <span className="fear-part-raw mono">{Number(p.value).toFixed(2)}</span>
+            </div>
+          ))}
+        </div>
+        <p className="ov-note">
+          Each bar is 0–100 on the same fear-to-greed scale as the headline. The right-hand figure is
+          the component's raw reading. A component with too little history in the window is left out
+          rather than guessed at.
+        </p>
+      </div>
+
+      <div className="ov-card">
+        <div className="chart-head">
+          <span className="mono ov-card-label" style={{ marginBottom: 0 }}>History</span>
+          <div className="metric-toggle">
+            {SIGNAL_PERIODS.map((p) => (
+              <button key={p} className={period === p ? 'active' : ''} onClick={() => setPeriod(p)}>{p}</button>
+            ))}
+          </div>
+        </div>
+        {!hist ? <div className="loading">Loading…</div> : hist.length < 2 ? <div className="empty">No history yet.</div> : (
+          <ResponsiveContainer width="100%" height={240}>
+            <LineChart data={hist} margin={{ top: 8, right: 16, bottom: 0, left: 4 }}>
+              <CartesianGrid stroke="#d4cdc0" strokeDasharray="2 4" vertical={false} />
+              <XAxis dataKey="date" tick={{ fontSize: 11, fontFamily: 'DM Mono, monospace' }} minTickGap={48} stroke="#7a7268" />
+              <YAxis domain={[0, 100]} ticks={[0, 20, 40, 60, 80, 100]} tick={{ fontSize: 11, fontFamily: 'DM Mono, monospace' }} stroke="#7a7268" width={34} />
+              <Tooltip formatter={(v) => [`${Math.round(v)} · ${v < 20 ? 'extreme fear' : v < 40 ? 'fear' : v < 60 ? 'neutral' : v < 80 ? 'greed' : 'extreme greed'}`, 'score']} labelStyle={{ fontFamily: 'DM Mono, monospace', fontSize: 12 }} />
+              <Line type="monotone" dataKey="value" stroke="#c8431f" strokeWidth={2} dot={false} isAnimationActive={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ---- venture map ------------------------------------------------------------
+const VENTURE_COLORS = ['#234e9c', '#c8431f', '#e8a32c', '#1d6e3a', '#7a5c9c', '#4a8a8a', '#8b6020'];
+
+// A hollow marker means the batch's own metadata is thin, so the point is an estimate.
+function confidenceDot() {
+  return ({ cx, cy, payload: p }) => {
+    if (cx == null || cy == null) return null;
+    const soft = p?.low_confidence;
+    return <circle cx={cx} cy={cy} r={soft ? 4 : 2.5} fill={soft ? '#faf6ec' : '#c8431f'} stroke="#c8431f" strokeWidth={soft ? 1.6 : 1} />;
+  };
+}
+
+function VentureMap() {
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    axios.get(`${API}/venture`).then((r) => setD(r.data))
+      .catch((e) => setErr(e.response?.data?.error || 'Could not load the venture map.'));
+  }, []);
+
+  if (err) return <div className="empty">{err}</div>;
+  if (!d) return <div className="loading">Loading YC's company directory…</div>;
+  if (d.empty) return <div className="empty">No venture data fetched yet — try Refresh.</div>;
+
+  // Charts use whole batches only. A batch still being announced has a fraction of its
+  // final company count, and a trend line drawn through it is just a drawing.
+  const full = d.batches.filter((b) => !b.partial && b.batch_year >= 2012);
+  const latest = full[full.length - 1] || null;
+  const clean = full.filter((b) => !b.low_confidence);
+  const latestClean = clean[clean.length - 1] || null;
+
+  // Sector mix: top industries by overall count, everything else folded into Other, each
+  // batch normalised to 100% so the chart shows mix rather than batch size.
+  const topInds = d.industries.slice(0, 6).map((i) => i.industry);
+  const byBatch = new Map();
+  for (const row of d.sectors) {
+    const key = `${row.batch_year}-${row.batch_season}`;
+    if (!byBatch.has(key)) byBatch.set(key, { batch: row.batch, batch_year: row.batch_year, batch_season: row.batch_season, total: 0 });
+    const rec = byBatch.get(key);
+    const bucket = topInds.includes(row.industry) ? row.industry : 'Other';
+    rec[bucket] = (rec[bucket] || 0) + row.n;
+    rec.total += row.n;
+  }
+  const partialKeys = new Set(d.batches.filter((b) => b.partial).map((b) => `${b.batch_year}-${b.batch_season}`));
+  const mix = [...byBatch.entries()]
+    .filter(([k]) => !partialKeys.has(k))
+    .map(([, rec]) => {
+      const out = { batch: rec.batch, batch_year: rec.batch_year, batch_season: rec.batch_season };
+      let used = 0;
+      for (const k of topInds) {
+        const v = rec.total ? Math.round(((rec[k] || 0) / rec.total) * 1000) / 10 : 0;
+        out[k] = v;
+        used += v;
+      }
+      // Other absorbs the rounding residue so the stack lands on exactly 100.
+      out.Other = rec.total ? Math.round((100 - used) * 10) / 10 : 0;
+      return out;
+    })
+    .sort((a, b) => a.batch_year - b.batch_year || a.batch_season - b.batch_season);
+
+  // Two letters, not one: Spring and Summer both start with S, and a chart with two
+  // different batches labelled "S25" is a chart that cannot be read.
+  const shortBatch = (s) => String(s || '').replace(/^(\w{2})\w*\s\d{2}(\d{2})$/, '$1$2');
+
+  return (
+    <>
+      <div className="sig-stat-row">
+        <div className="sig-stat"><span className="mono sig-stat-label">Companies tracked</span><span className="sig-stat-value mono">{d.total.toLocaleString()}</span><span className="sig-stat-note">whole YC history, 2005 →</span></div>
+        <div className="sig-stat"><span className="mono sig-stat-label">AI share, {latestClean?.batch || '—'}</span><span className="sig-stat-value mono" style={{ color: 'var(--brick)' }}>{latestClean ? `${latestClean.ai_share}%` : '—'}</span><span className="sig-stat-note">latest fully-tagged batch</span></div>
+        <div className="sig-stat"><span className="mono sig-stat-label">Batch size, {latest?.batch || '—'}</span><span className="sig-stat-value mono">{latest?.companies ?? '—'}</span><span className="sig-stat-note">companies admitted</span></div>
+        <div className="sig-stat"><span className="mono sig-stat-label">Non-US share</span><span className="sig-stat-value mono">{latest ? `${latest.non_us_share}%` : '—'}</span><span className="sig-stat-note">{latest ? `${latest.uk_companies} from the UK` : ''}</span></div>
+      </div>
+
+      <div className="ov-card">
+        <span className="mono ov-card-label">AI share of each batch</span>
+        <ResponsiveContainer width="100%" height={260}>
+          <LineChart data={full} margin={{ top: 8, right: 16, bottom: 0, left: 4 }}>
+            <CartesianGrid stroke="#d4cdc0" strokeDasharray="2 4" vertical={false} />
+            <XAxis dataKey="batch" tickFormatter={shortBatch} tick={{ fontSize: 10, fontFamily: 'DM Mono, monospace' }} minTickGap={16} stroke="#7a7268" />
+            <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11, fontFamily: 'DM Mono, monospace' }} stroke="#7a7268" width={46} />
+            <Tooltip formatter={(v, n, p) => [`${v}%${p?.payload?.low_confidence ? ' (estimate — thin metadata)' : ''}`, 'AI share']} labelStyle={{ fontFamily: 'DM Mono, monospace', fontSize: 12 }} />
+            <Line type="monotone" dataKey="ai_share" stroke="#c8431f" strokeWidth={2} dot={confidenceDot()} isAnimationActive={false} />
+          </LineChart>
+        </ResponsiveContainer>
+        <p className="ov-note">
+          A company counts as AI if its tags or its own one-liner say so. Two 2026 batches arrived with
+          most companies untagged upstream — those points are drawn <strong>hollow</strong> and are
+          likely to understate the true share. Tag coverage: {full.filter((b) => b.low_confidence).map((b) => `${b.batch} ${b.tag_coverage}%`).join(' · ') || 'complete across all charted batches'}.
+        </p>
+      </div>
+
+      <div className="ov-card">
+        <span className="mono ov-card-label">Sector mix, share of each batch</span>
+        <ResponsiveContainer width="100%" height={280}>
+          <AreaChart data={mix} margin={{ top: 8, right: 16, bottom: 0, left: 4 }}>
+            <CartesianGrid stroke="#d4cdc0" strokeDasharray="2 4" vertical={false} />
+            <XAxis dataKey="batch" tickFormatter={shortBatch} tick={{ fontSize: 10, fontFamily: 'DM Mono, monospace' }} minTickGap={16} stroke="#7a7268" />
+            <YAxis domain={[0, 100]} ticks={[0, 25, 50, 75, 100]} allowDataOverflow unit="%" tick={{ fontSize: 11, fontFamily: 'DM Mono, monospace' }} stroke="#7a7268" width={46} />
+            <Tooltip labelStyle={{ fontFamily: 'DM Mono, monospace', fontSize: 12 }} formatter={(v, n) => [`${v}%`, n]} />
+            <Legend wrapperStyle={{ fontSize: 11, fontFamily: 'DM Mono, monospace' }} />
+            {[...topInds, 'Other'].map((ind, i) => (
+              <Area key={ind} type="monotone" dataKey={ind} stackId="1" stroke={VENTURE_COLORS[i % VENTURE_COLORS.length]}
+                fill={VENTURE_COLORS[i % VENTURE_COLORS.length]} fillOpacity={0.75} isAnimationActive={false} />
+            ))}
+          </AreaChart>
+        </ResponsiveContainer>
+        <p className="ov-note">YC's own industry labels, normalised to each batch's size — so this reads as a change in taste, not a change in batch size.</p>
+      </div>
+
+      <div className="sig-two-col">
+        <div className="ov-card">
+          <span className="mono ov-card-label">Batch size</span>
+          <ResponsiveContainer width="100%" height={200}>
+            <BarChart data={full} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+              <CartesianGrid stroke="#d4cdc0" strokeDasharray="2 4" vertical={false} />
+              <XAxis dataKey="batch" tickFormatter={shortBatch} tick={{ fontSize: 10, fontFamily: 'DM Mono, monospace' }} minTickGap={16} stroke="#7a7268" />
+              <YAxis tick={{ fontSize: 11, fontFamily: 'DM Mono, monospace' }} stroke="#7a7268" width={38} />
+              <Tooltip labelStyle={{ fontFamily: 'DM Mono, monospace', fontSize: 12 }} formatter={(v) => [v, 'companies']} />
+              <Bar dataKey="companies" fill="#234e9c" isAnimationActive={false} />
+            </BarChart>
+          </ResponsiveContainer>
+          <p className="ov-note">How many companies YC took. The 2021–22 peak and the pullback after it are the clearest cheap-money signature in this dataset.</p>
+        </div>
+        <div className="ov-card">
+          <span className="mono ov-card-label">Share of each batch based outside the US</span>
+          <ResponsiveContainer width="100%" height={200}>
+            <LineChart data={full} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+              <CartesianGrid stroke="#d4cdc0" strokeDasharray="2 4" vertical={false} />
+              <XAxis dataKey="batch" tickFormatter={shortBatch} tick={{ fontSize: 10, fontFamily: 'DM Mono, monospace' }} minTickGap={16} stroke="#7a7268" />
+              <YAxis domain={[0, 60]} unit="%" tick={{ fontSize: 11, fontFamily: 'DM Mono, monospace' }} stroke="#7a7268" width={42} />
+              <Tooltip labelStyle={{ fontFamily: 'DM Mono, monospace', fontSize: 12 }} formatter={(v) => [`${v}%`, 'non-US']} />
+              <Line type="monotone" dataKey="non_us_share" stroke="#1d6e3a" strokeWidth={2} dot={false} isAnimationActive={false} />
+            </LineChart>
+          </ResponsiveContainer>
+          <p className="ov-note">Not confounded by batch age, unlike the outcome columns below — a company's location does not change with time the way its status does.</p>
+        </div>
+      </div>
+
+      <div className="ov-card">
+        <span className="mono ov-card-label">Cohort outcomes — read the age warning first</span>
+        <div className="table-wrap" style={{ maxHeight: 300, overflow: 'auto' }}>
+          <table>
+            <thead>
+              <tr>
+                <th className="left">Batch</th><th>Companies</th><th>AI</th><th>Hiring</th>
+                <th>Non-US</th><th>UK</th><th>Acquired / public</th><th>Inactive</th><th>Avg team</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...d.batches].reverse().map((b) => (
+                <tr key={b.batch} className={b.partial ? 'sig-row-soft' : ''}>
+                  <td className="left mono">{b.batch}{b.partial ? ' ·' : ''}{b.low_confidence ? ' †' : ''}</td>
+                  <td className="mono">{b.companies}</td>
+                  <td className="mono">{b.ai_share}%</td>
+                  <td className="mono">{b.hiring_share}%</td>
+                  <td className="mono">{b.non_us_share}%</td>
+                  <td className="mono">{b.uk_companies}</td>
+                  <td className="mono">{b.exit_share}%</td>
+                  <td className="mono">{b.dead_share}%</td>
+                  <td className="mono">{b.avg_team ?? '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="ov-note">
+          <strong>Age warning.</strong> Hiring, acquired/public, inactive and average team are all snapshots
+          of today, so an older batch has simply had more time to exit, die and grow. Reading them as a
+          trend across batches measures the passage of time, not the market. Compare batches of equal age
+          instead. <em>· = still being announced. † = thin upstream metadata.</em>
+        </p>
+      </div>
+
+      <div className="sig-two-col">
+        <div className="ov-card">
+          <span className="mono ov-card-label">What they are building, 2025 →</span>
+          <div className="sig-bars">
+            {d.subindustries.slice(0, 12).map((s) => {
+              const max = d.subindustries[0]?.n || 1;
+              return (
+                <div key={s.subindustry} className="sig-bar-row">
+                  <span className="sig-bar-label">{s.subindustry}</span>
+                  <span className="sig-bar-track"><span style={{ width: `${(s.n / max) * 100}%` }} /></span>
+                  <span className="sig-bar-n mono">{s.n}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <div className="ov-card">
+          <span className="mono ov-card-label">Where they are, since 2024</span>
+          <div className="sig-bars">
+            {d.countries.slice(0, 10).map((c) => {
+              const max = d.countries[0]?.recent || 1;
+              return (
+                <div key={c.country} className="sig-bar-row">
+                  <span className="sig-bar-label">{c.country}</span>
+                  <span className="sig-bar-track"><span style={{ width: `${(c.recent / max) * 100}%`, background: 'var(--cobalt)' }} /></span>
+                  <span className="sig-bar-n mono">{c.recent}</span>
+                </div>
+              );
+            })}
+          </div>
+          <p className="ov-note">"Remote" and "Unspecified" are YC's own labels, kept rather than quietly dropped.</p>
+        </div>
+      </div>
+
+      <p className="ov-note" style={{ marginTop: 4 }}>
+        <strong>What this is and is not.</strong> Real venture aggregates — deal counts, valuations, dry
+        powder — sit behind Crunchbase, PitchBook and Dealroom paywalls. This is one accelerator's
+        twenty-year history, which is a sample of early-stage <em>taste</em>, not a picture of the market.
+        It is early, US-weighted and software-weighted by construction. Source: yc-oss.github.io, rebuilt
+        daily{d.as_of ? ` · fetched ${fmtAgo(d.as_of)}` : ''}.
+      </p>
+    </>
+  );
+}
+
+// ---- the tab ----------------------------------------------------------------
+function Signals() {
+  const [sub, setSub] = useState('fear');
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    setErr('');
+    axios.get(`${API}/signals`).then((r) => setData(r.data))
+      .catch((e) => setErr(e.response?.data?.error || 'Could not reach the signals API.'));
+  }, []);
+  useEffect(load, [load]);
+
+  const refresh = async () => {
+    setBusy(true);
+    try { await axios.post(`${API}/signals/refresh`); load(); }
+    catch { setErr('Refresh failed — check the network, then try again.'); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <>
+      <div className="section-head">
+        <div className="section-titles">
+          <h2>Signals</h2>
+          <div className="subnav">
+            {SIGNAL_SUBS.map((s) => (
+              <button key={s.key} className={`subnav-item ${sub === s.key ? 'active' : ''}`} onClick={() => setSub(s.key)}>{s.label}</button>
+            ))}
+          </div>
+        </div>
+        <div className="head-actions">
+          <span className="mono sig-asof">{data ? `updated ${fmtAgo(data.fetched_at)}` : ''}</span>
+          <button className="csv-btn" onClick={refresh} disabled={busy}>{busy ? 'Refreshing…' : 'Refresh'}</button>
+        </div>
+      </div>
+
+      {err && <div className="empty">{err}</div>}
+      {!err && !data && <div className="loading">Fetching market data… the first run backfills about ten years, so give it a moment.</div>}
+
+      {!err && data && (
+        <div className="sig-body">
+          {sub === 'fear' && <FearPanel fear={data.fear} />}
+          {sub === 'risk' && <SignalGroup list={data.groups.risk} note="Click any tile for its full history. Volatility and spreads are the market pricing its own uncertainty; the Fed indices are weekly, so they move in steps." />}
+          {sub === 'rates' && <SignalGroup list={data.groups.rates} note="Treasury yields and the curve. The 10-year is the discount rate sitting under every long-duration asset you hold." />}
+          {sub === 'macro' && <SignalGroup list={data.groups.macro} note="Monthly series (CPI, unemployment, sentiment) update once a month and will look flat in between — that is the publication schedule, not the economy." />}
+          {sub === 'venture' && <VentureMap />}
+        </div>
+      )}
+
+      <p className="ov-note" style={{ marginTop: 18 }}>
+        Sources: FRED (St. Louis Fed) for every macro series, alternative.me for crypto sentiment,
+        yc-oss.github.io for the venture directory. All free, none needing an API key. CNN's own
+        Fear &amp; Greed endpoint refuses automated clients, so the composite here is computed from its
+        components instead — which means you can see exactly how it is built.
+      </p>
+    </>
   );
 }
 

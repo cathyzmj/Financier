@@ -155,3 +155,56 @@ CREATE INDEX IF NOT EXISTS idx_tx_holding ON transactions(holding_id);
 CREATE INDEX IF NOT EXISTS idx_memo_holding ON memos(holding_id);
 CREATE INDEX IF NOT EXISTS idx_thesis_holding ON thesis_history(holding_id);
 CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date);
+
+-- ============================ MARKET SIGNALS ============================
+-- The ledger tables above only have something to say when you trade. These have
+-- something to say every day, and nothing in them is ever typed by hand.
+
+-- signal_metrics: the catalogue of tracked metrics. Seeded by the server on boot from
+-- SIGNAL_CATALOG, so adding a metric means editing code, not this table.
+CREATE TABLE IF NOT EXISTS signal_metrics (
+  key            TEXT PRIMARY KEY,
+  label          TEXT NOT NULL,
+  grp            TEXT NOT NULL,            -- risk | rates | macro
+  source         TEXT NOT NULL,            -- fred | cryptofng | derived
+  source_id      TEXT,                     -- e.g. FRED series id "VIXCLS"
+  unit           TEXT NOT NULL DEFAULT 'level', -- level | pct | ratio | index
+  decimals       INTEGER NOT NULL DEFAULT 2,
+  blurb          TEXT,                     -- one line: what this number actually tells you
+  sort_order     INTEGER NOT NULL DEFAULT 0
+);
+
+-- signal_values: one row per metric per observation date. Unlike price_cache (a 15-min
+-- overwrite), this is kept forever — a trend metric is useless without its history, and
+-- FRED hands over the full series in a single call, so a cold DB backfills years at once.
+CREATE TABLE IF NOT EXISTS signal_values (
+  metric_key  TEXT NOT NULL,
+  date        TEXT NOT NULL,   -- ISO date
+  value       REAL NOT NULL,
+  PRIMARY KEY (metric_key, date)
+);
+
+-- venture_companies: YC's public company directory, trimmed to the fields the venture
+-- map aggregates over. Refreshed daily; the full upstream payload is ~11 MB of JSON.
+CREATE TABLE IF NOT EXISTS venture_companies (
+  id           INTEGER PRIMARY KEY,
+  name         TEXT,
+  batch        TEXT,      -- "Winter 2026"
+  batch_year   INTEGER,
+  batch_season INTEGER,   -- 1 Winter · 2 Spring · 3 Summer · 4 Fall — for sorting
+  industry     TEXT,
+  subindustry  TEXT,
+  country      TEXT,
+  team_size    INTEGER,
+  status       TEXT,      -- Active | Inactive | Acquired | Public
+  stage        TEXT,      -- Early | Growth
+  is_hiring    INTEGER NOT NULL DEFAULT 0,
+  top_company  INTEGER NOT NULL DEFAULT 0,
+  is_ai        INTEGER NOT NULL DEFAULT 0,  -- derived from tags at import time
+  tags         TEXT,      -- JSON array, kept so the AI test can be re-run
+  one_liner    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_signal_values_key  ON signal_values(metric_key, date);
+CREATE INDEX IF NOT EXISTS idx_venture_batch      ON venture_companies(batch_year, batch_season);
+CREATE INDEX IF NOT EXISTS idx_venture_industry   ON venture_companies(industry);
