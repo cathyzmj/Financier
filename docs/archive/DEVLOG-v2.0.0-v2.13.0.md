@@ -1,5 +1,9 @@
 # Financier — Development Log
 
+> **归档 / Archived 2026-11-27.** 覆盖 v2.0.0 → v2.13.0，之后不再追加。现有功能与 workflow 见
+> [FEATURES-AND-WORKFLOWS.md](../FEATURES-AND-WORKFLOWS.md)。归档时更正了 v2.13.0 条目里一处错误
+> （被丢掉的周频分量是 1 个，不是 2 个）。
+
 A running record of what changed, why, the bugs hit, and how they were resolved.
 **Newest version on top.**
 
@@ -10,6 +14,59 @@ A running record of what changed, why, the bugs hit, and how they were resolved.
 
 To cut a new version: pick the number per the rules above, update `APP_VERSION` in
 `web/src/App.jsx` (it shows next to the logo), and add a section here.
+
+---
+
+## v2.13.0 — 2026-11-27 — Signals: market metrics that need no input
+
+The ledger half of this app only has something to say when you trade; in a quiet
+stretch it has nothing to say at all. The failure mode is always the same one: every
+valuable thing in that half has to be typed in. So this release adds a
+second half that is **entirely fetched** — a market dashboard with no input fields.
+### Added
+- **`Signals` tab**, sitting straight after Overview because it is now the front door.
+  Five views: Fear & greed, Risk, Rates, Macro, Venture map.
+- **A composite fear & greed index, computed here rather than scraped.** CNN's endpoint
+  answers `HTTP 418 "I'm a teapot. You're a bot."`, which turned out to be a favour:
+  seven components (VIX, the VIX/VIX3M term structure, high-yield spreads, the St. Louis
+  Fed stress index, S&P momentum against its own 125-day mean, 20-day stocks-minus-bonds,
+  and crypto Fear & Greed), each ranked against its **own trailing year**, then averaged
+  to 0–100. Visible methodology beats a borrowed number you cannot inspect.
+- **27 metrics** across risk, rates and macro, each a tile with a 90-day sparkline, a
+  30-day change and a one-line note on what it actually tells you. Click for full history.
+- **Venture map** from YC's public directory (6,409 companies, 2005 →): AI share by batch,
+  sector mix normalised per batch, batch size, non-US share, and a cohort-outcome table.
+- `signal_metrics`, `signal_values` and `venture_companies` tables. Unlike `price_cache`
+  (a 15-minute overwrite) these keep full history — a trend metric without its series is
+  not a metric. FRED returns a whole series per call, so a cold DB backfills ~10 years.
+### Data sources — all free, none needing an API key
+FRED's `fredgraph.csv` endpoint for every macro series, `alternative.me` for crypto
+sentiment, `yc-oss.github.io` for the venture directory. Each was curl-tested before it
+was written in. **Yahoo was deliberately kept out of this module**: it rate-limits to
+HTTP 429 without warning, which is survivable for a quote and not for a dashboard.
+### Two bugs worth recording
+- **Weekly series could never reach the composite.** The percentile rank needed 60
+  observations in its one-year window; a weekly series carries ~52. The St. Louis Fed
+  stress index was being silently dropped and the score was quietly running on six
+  components instead of seven. Floor lowered to 30 — weekly qualifies, monthly (12) still
+  does not.
+- **The venture map invented an AI crash.** Detecting AI companies from YC's tags alone
+  showed AI share falling 66% → 24% and rebounding to 72%. It was an upstream tagging
+  gap: Winter 2026 shipped 136 of 198 companies with no tags at all, while the batches
+  either side had two. 79 of those 136 said "AI" in their own one-liner. Detection now
+  reads tags **or** the one-liner, and any batch under 60% tag coverage is flagged and
+  drawn with a hollow marker, because the fallback narrows the gap without closing it.
+### Honest limits, stated in the UI rather than buried here
+- The composite is a **relative** reading: a calm year makes an ordinary wobble look
+  extreme. Said on the page, not just in this log.
+- Hiring, exit, inactive and team-size columns in the venture table are snapshots of
+  today, so comparing them across batches measures batch *age*, not the market. The
+  table carries that warning above the fold.
+- Real venture aggregates — deal counts, valuations, dry powder — are behind Crunchbase,
+  PitchBook and Dealroom paywalls. YC is one accelerator: a sample of early-stage taste,
+  not a picture of the market. SEC Form D would add genuine US fundraising counts but
+  SEC policy requires a real email address in the User-Agent, so it was left out rather
+  than quietly putting personal contact details into an outbound header.
 
 ---
 

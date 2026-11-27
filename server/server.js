@@ -1765,6 +1765,580 @@ app.post('/api/t212/sync', async (req, res) => {
   }
 });
 
+// ============================ MARKET SIGNALS ============================
+// Why this exists: the ledger half of Financier only has something to say when you
+// trade. These metrics have something to say every day — and not one of them needs a
+// keystroke. Every number below is fetched; none is entered.
+//
+// Sources, all free and all key-less. Each was curl-tested before it went in here:
+//   FRED   fredgraph.csv?id=<series>  — the macro backbone. One call returns a series'
+//          full daily history, so a cold database backfills years in a single pass.
+//   alternative.me/fng — crypto Fear & Greed: risk appetite at its frothiest end.
+//   yc-oss.github.io   — YC's public company directory, the only free structured
+//          venture dataset worth having (see the venture section below).
+// Deliberately NOT used: CNN's Fear & Greed endpoint replies HTTP 418 "You're a bot".
+// The composite here is computed from its own components instead, which is the better
+// outcome anyway — the methodology is visible and reproducible rather than borrowed.
+
+const FRED_START = '2015-01-01';
+const SIGNALS_TTL_MS = 12 * 60 * 60 * 1000;  // macro series move at most daily
+const VENTURE_TTL_MS = 24 * 60 * 60 * 1000;  // YC's dump is rebuilt once a day
+const PCT_WINDOW_DAYS = 365;                 // lookback the percentile ranks are taken over
+const PCT_MIN_OBS = 30;                      // below this a component is left out, not faked.
+// 30 is chosen deliberately: a weekly series carries ~52 observations a year and must
+// qualify, while a monthly one carries 12 and must not — a percentile of 12 points is
+// noise wearing a number. At 60 every weekly feed was silently dropped from the score.
+
+// grp drives which section of the UI a metric lands in; blurb is what the UI shows under
+// the number, because a metric you can't interpret is just decoration.
+const SIGNAL_CATALOG = [
+  // ---- risk -------------------------------------------------------------------
+  { key: 'fear_index', label: 'Fear & Greed', grp: 'risk', source: 'derived', unit: 'index', decimals: 0, sort: 0,
+    blurb: '0 = extreme fear, 100 = extreme greed. Composite of the seven components below.' },
+  { key: 'vix', label: 'VIX', grp: 'risk', source: 'fred', source_id: 'VIXCLS', unit: 'level', decimals: 2, sort: 1,
+    blurb: "S&P 500 implied volatility, 30 days out — the market's own price for insurance." },
+  { key: 'vix3m', label: 'VIX 3-month', grp: 'risk', source: 'fred', source_id: 'VXVCLS', unit: 'level', decimals: 2, sort: 2,
+    blurb: 'Same thing, 3 months out. The anchor the front month is measured against.' },
+  { key: 'vix_term', label: 'Vol term structure', grp: 'risk', source: 'derived', unit: 'ratio', decimals: 3, sort: 3,
+    blurb: 'VIX ÷ 3-month VIX. Above 1.00 is backwardation: fear that is acute, not chronic.' },
+  { key: 'vxn', label: 'Nasdaq vol (VXN)', grp: 'risk', source: 'fred', source_id: 'VXNCLS', unit: 'level', decimals: 2, sort: 4,
+    blurb: 'Nasdaq-100 implied vol. Far above VIX means the stress is tech-specific.' },
+  // FRED serves ICE BofA's spread series under licence and only hands back a rolling
+  // ~3-year window without an API key. That is not a bug to chase: the composite ranks
+  // each component over a trailing year, so three years is more than it ever needs.
+  { key: 'hy_oas', label: 'High-yield spread', grp: 'risk', source: 'fred', source_id: 'BAMLH0A0HYM2', unit: 'pct', decimals: 2, sort: 5,
+    blurb: 'Extra yield demanded to lend to junk issuers. Credit panics before equities do.' },
+  { key: 'ig_oas', label: 'Investment-grade spread', grp: 'risk', source: 'fred', source_id: 'BAMLC0A0CM', unit: 'pct', decimals: 2, sort: 6,
+    blurb: 'The same measure for safe corporate borrowers. Widens only in real trouble.' },
+  { key: 'stlfsi', label: 'Financial stress index', grp: 'risk', source: 'fred', source_id: 'STLFSI4', unit: 'index', decimals: 3, sort: 7,
+    blurb: 'St. Louis Fed, weekly. Zero is normal; above zero is tighter than normal.' },
+  { key: 'nfci', label: 'Financial conditions', grp: 'risk', source: 'fred', source_id: 'NFCI', unit: 'index', decimals: 3, sort: 8,
+    blurb: 'Chicago Fed, weekly. Negative = looser than average credit, leverage and risk.' },
+  { key: 'spx_momentum', label: 'Market momentum', grp: 'risk', source: 'derived', unit: 'pct', decimals: 2, sort: 9,
+    blurb: 'S&P 500 distance above its own 125-day average. Negative = trend has turned.' },
+  { key: 'safe_haven', label: 'Safe-haven demand', grp: 'risk', source: 'derived', unit: 'pct', decimals: 2, sort: 10,
+    blurb: '20-day stock return minus an estimated bond return. Negative = money hiding.' },
+  { key: 'crypto_fng', label: 'Crypto Fear & Greed', grp: 'risk', source: 'cryptofng', unit: 'index', decimals: 0, sort: 11,
+    blurb: 'alternative.me, 0-100. The most speculative money, so it turns first.' },
+  // ---- rates ------------------------------------------------------------------
+  { key: 'dgs3mo', label: '3-month Treasury', grp: 'rates', source: 'fred', source_id: 'DGS3MO', unit: 'pct', decimals: 2, sort: 20,
+    blurb: 'Where policy actually sits right now.' },
+  { key: 'dgs2', label: '2-year Treasury', grp: 'rates', source: 'fred', source_id: 'DGS2', unit: 'pct', decimals: 2, sort: 21,
+    blurb: "The market's forecast of policy over the next two years." },
+  { key: 'dgs10', label: '10-year Treasury', grp: 'rates', source: 'fred', source_id: 'DGS10', unit: 'pct', decimals: 2, sort: 22,
+    blurb: 'The discount rate under every long-duration asset you own.' },
+  { key: 't10y2y', label: '10y − 2y curve', grp: 'rates', source: 'fred', source_id: 'T10Y2Y', unit: 'pct', decimals: 2, sort: 23,
+    blurb: 'Below zero is an inversion — historically an early recession signal.' },
+  { key: 't10yie', label: '10y breakeven inflation', grp: 'rates', source: 'fred', source_id: 'T10YIE', unit: 'pct', decimals: 2, sort: 24,
+    blurb: 'Inflation the bond market is actually pricing, not what forecasters say.' },
+  // ---- macro ------------------------------------------------------------------
+  { key: 'sp500', label: 'S&P 500', grp: 'macro', source: 'fred', source_id: 'SP500', unit: 'level', decimals: 0, sort: 40,
+    blurb: 'Index level. Also feeds the momentum and safe-haven components above.' },
+  { key: 'nasdaq', label: 'Nasdaq Composite', grp: 'macro', source: 'fred', source_id: 'NASDAQCOM', unit: 'level', decimals: 0, sort: 41,
+    blurb: 'The long-duration, high-growth end of the equity market.' },
+  { key: 'dxy', label: 'Dollar index', grp: 'macro', source: 'fred', source_id: 'DTWEXBGS', unit: 'index', decimals: 2, sort: 42,
+    blurb: 'Broad trade-weighted dollar. A rising dollar tightens the whole world.' },
+  { key: 'wti', label: 'WTI crude', grp: 'macro', source: 'fred', source_id: 'DCOILWTICO', unit: 'level', decimals: 2, sort: 43,
+    blurb: 'Oil, $/barrel — the fastest-moving input to headline inflation.' },
+  { key: 'cpi_yoy', label: 'US CPI, year on year', grp: 'macro', source: 'derived', unit: 'pct', decimals: 2, sort: 44,
+    blurb: 'Realised inflation, monthly. Compare against the breakeven above.' },
+  { key: 'unrate', label: 'US unemployment', grp: 'macro', source: 'fred', source_id: 'UNRATE', unit: 'pct', decimals: 1, sort: 45,
+    blurb: 'Monthly. The other half of the mandate the Fed is trading off.' },
+  { key: 'umcsent', label: 'Consumer sentiment', grp: 'macro', source: 'fred', source_id: 'UMCSENT', unit: 'index', decimals: 1, sort: 46,
+    blurb: 'U. Michigan, monthly. How households feel, which is not how markets feel.' },
+  { key: 'recession_prob', label: 'Recession probability', grp: 'macro', source: 'fred', source_id: 'RECPROUSM156N', unit: 'pct', decimals: 2, sort: 47,
+    blurb: 'Smoothed model estimate, monthly. Slow-moving by construction.' },
+  { key: 'gbpusd', label: 'GBP/USD', grp: 'macro', source: 'fred', source_id: 'DEXUSUK', unit: 'level', decimals: 4, sort: 48,
+    blurb: 'Dollars per pound — the rate your UK balances convert at.' },
+  { key: 'usdcny', label: 'USD/CNY', grp: 'macro', source: 'fred', source_id: 'DEXCHUS', unit: 'level', decimals: 4, sort: 49,
+    blurb: 'Yuan per dollar. Beijing manages it, so moves are policy, not noise.' },
+  { key: 'cpi_index', label: 'US CPI index', grp: 'macro', source: 'fred', source_id: 'CPIAUCSL', unit: 'level', decimals: 2, sort: 60,
+    blurb: 'Raw index level. Carried only so the year-on-year rate above can be derived.' },
+];
+
+// The composite. dir = +1 when a high reading means greed, -1 when it means fear.
+// `how: 'raw'` is for a component that already arrives as a 0-100 sentiment index;
+// everything else is converted to a percentile of its own trailing year, which makes
+// series on wildly different units (a ratio, a spread in %, a stress z-score) comparable.
+const FEAR_COMPONENTS = [
+  { key: 'vix',          label: 'Equity volatility',    dir: -1, how: 'percentile' },
+  { key: 'vix_term',     label: 'Vol term structure',   dir: -1, how: 'percentile' },
+  { key: 'hy_oas',       label: 'Credit spreads',       dir: -1, how: 'percentile' },
+  { key: 'stlfsi',       label: 'Financial stress',     dir: -1, how: 'percentile' },
+  { key: 'spx_momentum', label: 'Market momentum',      dir:  1, how: 'percentile' },
+  { key: 'safe_haven',   label: 'Safe-haven demand',    dir:  1, how: 'percentile' },
+  { key: 'crypto_fng',   label: 'Crypto risk appetite', dir:  1, how: 'raw' },
+];
+
+function fearLabel(score) {
+  if (score == null) return '—';
+  if (score < 20) return 'Extreme fear';
+  if (score < 40) return 'Fear';
+  if (score < 60) return 'Neutral';
+  if (score < 80) return 'Greed';
+  return 'Extreme greed';
+}
+
+// ---- metric catalogue -------------------------------------------------------
+function seedSignalCatalog() {
+  const up = db.prepare(`INSERT INTO signal_metrics (key, label, grp, source, source_id, unit, decimals, blurb, sort_order)
+    VALUES (@key, @label, @grp, @source, @source_id, @unit, @decimals, @blurb, @sort)
+    ON CONFLICT(key) DO UPDATE SET label=excluded.label, grp=excluded.grp, source=excluded.source,
+      source_id=excluded.source_id, unit=excluded.unit, decimals=excluded.decimals,
+      blurb=excluded.blurb, sort_order=excluded.sort_order`);
+  const tx = db.transaction(() => {
+    for (const m of SIGNAL_CATALOG) up.run({ source_id: null, ...m });
+    // Drop metrics that have been removed from the catalogue, so the UI never renders a
+    // tile the code no longer knows how to compute.
+    const keys = SIGNAL_CATALOG.map((m) => m.key);
+    db.prepare(`DELETE FROM signal_metrics WHERE key NOT IN (${keys.map(() => '?').join(',')})`).run(...keys);
+  });
+  tx();
+}
+try { seedSignalCatalog(); } catch (e) { console.error('signal catalogue warning:', e.message); }
+
+// ---- storage helpers --------------------------------------------------------
+const insertValue = db.prepare(`INSERT INTO signal_values (metric_key, date, value) VALUES (?, ?, ?)
+  ON CONFLICT(metric_key, date) DO UPDATE SET value = excluded.value`);
+const writeSeries = db.transaction((key, points) => {
+  for (const p of points) if (Number.isFinite(p.value)) insertValue.run(key, p.date, p.value);
+});
+// Ascending by date, which every computation below depends on.
+function seriesArray(key) {
+  return db.prepare('SELECT date, value FROM signal_values WHERE metric_key = ? ORDER BY date').all(key);
+}
+function latestOf(key) {
+  return db.prepare('SELECT date, value FROM signal_values WHERE metric_key = ? ORDER BY date DESC LIMIT 1').get(key) || null;
+}
+
+// ---- fetchers ---------------------------------------------------------------
+// FRED's chart-download endpoint needs no API key and no registration, which is the
+// whole reason the backbone of this module sits on it rather than on Yahoo (whose quote
+// endpoint rate-limits to HTTP 429 without warning).
+async function fetchFredSeries(seriesId) {
+  const url = `https://fred.stlouisfed.org/graph/fredgraph.csv?id=${encodeURIComponent(seriesId)}&cosd=${FRED_START}`;
+  const { data } = await axios.get(url, { timeout: 25000, responseType: 'text', ...netOpts() });
+  const lines = String(data).trim().split(/\r?\n/);
+  if (!lines.length || !/^observation_date|^DATE/i.test(lines[0])) throw new Error(`unexpected CSV header for ${seriesId}`);
+  const out = [];
+  for (let i = 1; i < lines.length; i++) {
+    const [date, raw] = lines[i].split(',');
+    // FRED writes "." or an empty field for holidays and not-yet-published periods.
+    const v = Number(raw);
+    if (date && raw && raw !== '.' && Number.isFinite(v)) out.push({ date: date.trim(), value: v });
+  }
+  return out;
+}
+
+async function fetchCryptoFng() {
+  // limit=0 asks for the whole history (daily since Feb 2018).
+  const { data } = await axios.get('https://api.alternative.me/fng/?limit=0&format=json', { timeout: 20000, ...netOpts() });
+  const rows = data?.data || [];
+  return rows.map((r) => ({
+    date: new Date(Number(r.timestamp) * 1000).toISOString().slice(0, 10),
+    value: Number(r.value),
+  })).filter((p) => Number.isFinite(p.value));
+}
+
+// Run async jobs with a small concurrency cap: polite to the upstream, and still turns a
+// cold start into a handful of seconds rather than twenty sequential round trips.
+async function pool(items, size, fn) {
+  const results = [];
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(size, items.length) }, async () => {
+    while (i < items.length) {
+      const idx = i++;
+      try { results.push({ item: items[idx], value: await fn(items[idx]) }); }
+      catch (e) { results.push({ item: items[idx], error: e.message }); }
+    }
+  }));
+  return results;
+}
+
+// ---- derived series ---------------------------------------------------------
+function movingAverage(arr, n) {
+  // Returns a same-length array of trailing n-point means; null until the window fills.
+  const out = new Array(arr.length).fill(null);
+  let sum = 0;
+  for (let i = 0; i < arr.length; i++) {
+    sum += arr[i].value;
+    if (i >= n) sum -= arr[i - n].value;
+    if (i >= n - 1) out[i] = sum / n;
+  }
+  return out;
+}
+
+function computeDerivedSeries() {
+  // Vol term structure: front-month VIX over 3-month VIX, on dates where both printed.
+  const v3 = new Map(seriesArray('vix3m').map((p) => [p.date, p.value]));
+  const term = [];
+  for (const p of seriesArray('vix')) {
+    const base = v3.get(p.date);
+    if (base > 0) term.push({ date: p.date, value: p.value / base });
+  }
+  writeSeries('vix_term', term);
+
+  // Market momentum: how far the S&P sits above its own 125-day mean, in percent.
+  // 125 sessions is roughly six months — long enough that it is a trend and not a week.
+  const spx = seriesArray('sp500');
+  const ma = movingAverage(spx, 125);
+  writeSeries('spx_momentum', spx.map((p, i) => (ma[i] ? { date: p.date, value: (p.value / ma[i] - 1) * 100 } : null)).filter(Boolean));
+
+  // Safe-haven demand: 20-session equity return minus an ESTIMATED bond return.
+  // The estimate is -duration x change-in-yield with duration 8, the rough modified
+  // duration of a 10-year note. It is an approximation and deliberately a crude one;
+  // what matters for a percentile rank is the sign and the swing, not the basis points.
+  const dgs10 = new Map(seriesArray('dgs10').map((p) => [p.date, p.value]));
+  const LAG = 20;
+  const haven = [];
+  for (let i = LAG; i < spx.length; i++) {
+    const now = spx[i], then = spx[i - LAG];
+    const yNow = dgs10.get(now.date), yThen = dgs10.get(then.date);
+    if (!(yNow >= 0) || !(yThen >= 0)) continue;
+    const equityRet = (now.value / then.value - 1) * 100;
+    const bondRet = -8 * (yNow - yThen);
+    haven.push({ date: now.date, value: equityRet - bondRet });
+  }
+  writeSeries('safe_haven', haven);
+
+  // CPI year on year from the raw index: 12 monthly observations back.
+  const cpi = seriesArray('cpi_index');
+  const yoy = [];
+  for (let i = 12; i < cpi.length; i++) {
+    yoy.push({ date: cpi[i].date, value: (cpi[i].value / cpi[i - 12].value - 1) * 100 });
+  }
+  writeSeries('cpi_yoy', yoy);
+}
+
+// ---- the composite ----------------------------------------------------------
+// Percentile rank of x within window: the share of observations at or below it. A high
+// VIX reading lands near 100 and is then flipped by dir = -1, so the published score
+// always reads 0 = fear, 100 = greed.
+function percentileRank(values, x) {
+  if (!values.length) return null;
+  let le = 0;
+  for (const v of values) if (v <= x) le++;
+  return (le / values.length) * 100;
+}
+
+function computeFearSeries() {
+  const comps = FEAR_COMPONENTS.map((c) => ({ ...c, arr: seriesArray(c.key), lo: 0, hi: -1 }));
+  const anchor = seriesArray('vix'); // the densest daily series: one score per session
+  if (!anchor.length) return;
+  const out = [];
+  const windowMs = PCT_WINDOW_DAYS * 86400000;
+
+  for (const day of anchor) {
+    const dayMs = new Date(day.date).getTime();
+    const cutoff = dayMs - windowMs;
+    const parts = [];
+    for (const c of comps) {
+      // Advance `hi` to the last observation at or before this day (forward-fill, so a
+      // weekly series like STLFSI keeps contributing on the four days it is silent).
+      while (c.hi + 1 < c.arr.length && new Date(c.arr[c.hi + 1].date).getTime() <= dayMs) c.hi++;
+      if (c.hi < 0) continue;
+      while (c.lo < c.hi && new Date(c.arr[c.lo].date).getTime() < cutoff) c.lo++;
+      const current = c.arr[c.hi].value;
+      let score;
+      if (c.how === 'raw') {
+        score = Math.max(0, Math.min(100, current));
+      } else {
+        const window = [];
+        for (let i = c.lo; i <= c.hi; i++) window.push(c.arr[i].value);
+        if (window.length < PCT_MIN_OBS) continue;
+        score = percentileRank(window, current);
+      }
+      if (score == null) continue;
+      parts.push({ key: c.key, label: c.label, score: c.dir === -1 ? 100 - score : score, value: current, as_of: c.arr[c.hi].date });
+    }
+    // Four of seven is the floor. Fewer than that and the average says more about which
+    // feeds happened to be up than about the market.
+    if (parts.length < 4) continue;
+    out.push({ date: day.date, value: parts.reduce((s, p) => s + p.score, 0) / parts.length, parts });
+  }
+  writeSeries('fear_index', out.map((o) => ({ date: o.date, value: o.value })));
+  // Keep the newest breakdown so the UI can show which components drove today's score.
+  const last = out[out.length - 1];
+  if (last) metaSet('fear_breakdown', JSON.stringify({ date: last.date, parts: last.parts }));
+}
+
+// ---- venture: YC's public company directory ---------------------------------
+// The honest framing, which the UI repeats: real venture aggregates (deal counts,
+// valuations, dry powder) live behind Crunchbase / PitchBook / Dealroom paywalls. This
+// is the best free structured substitute — one accelerator's whole 20-year history,
+// which is a sample of early-stage taste rather than a picture of the market. It is
+// still the fastest honest read on what the sector mix is doing batch over batch.
+// Classifying a company as AI is the single most load-bearing judgement in this whole
+// section, so it does not lean on tags alone. Two of the 2026 batches arrived with 136
+// of 198 and 125 of 193 companies carrying NO tags at all, while the batches either side
+// had two — an upstream tagging gap, not a collapse in AI funding. Tags-only detection
+// reported AI falling from 66% to 24% and rebounding to 72%, which is an artefact, and a
+// chart of it would have been a straightforwardly false claim about the market.
+// So: tags OR the company's own one-liner, which is populated for essentially everyone.
+const AI_TAG_RE = /\b(ai|artificial intelligence|machine learning|generative ai|ai assistant|conversational ai|computer vision|llm|deep learning)\b/i;
+// Case-SENSITIVE \bAI\b on purpose: "AI" as a standalone word is a strong signal, while a
+// case-insensitive match would catch "Ai" inside names. Bare "agent" is excluded too —
+// insurance, travel and estate agents are not an AI thesis — but "agentic" and "AI agent"
+// are kept.
+const AI_TEXT_RE = /\bAI\b|\bA\.I\.|artificial intelligence|machine learning|deep learning|computer vision|\bLLMs?\b|\bGPT|agentic|AI agents?|co-?pilot|chatbot|\bNLP\b|generative/;
+function looksLikeAI(tags, oneLiner, name) {
+  if (tags.some((t) => AI_TAG_RE.test(t))) return true;
+  return AI_TEXT_RE.test(`${oneLiner || ''} ${name || ''}`);
+}
+const SEASON_ORDER = { winter: 1, spring: 2, summer: 3, fall: 4, autumn: 4 };
+
+function parseBatch(batch) {
+  const m = /^([A-Za-z]+)\s+(\d{4})$/.exec(String(batch || '').trim());
+  if (!m) return { year: null, season: null };
+  return { year: Number(m[2]), season: SEASON_ORDER[m[1].toLowerCase()] ?? null };
+}
+
+async function fetchVenture() {
+  // ~11 MB of JSON, rebuilt upstream once a day — hence the 24-hour TTL above.
+  const { data } = await axios.get('https://yc-oss.github.io/api/companies/all.json', {
+    timeout: 90000, maxContentLength: 40 * 1024 * 1024, maxBodyLength: 40 * 1024 * 1024, ...netOpts(),
+  });
+  if (!Array.isArray(data)) throw new Error('unexpected YC payload');
+  const rows = data.map((c) => {
+    const { year, season } = parseBatch(c.batch);
+    const tags = Array.isArray(c.tags) ? c.tags : [];
+    return {
+      id: c.id,
+      name: c.name || null,
+      batch: c.batch || null,
+      batch_year: year,
+      batch_season: season,
+      industry: c.industry || null,
+      subindustry: c.subindustry || null,
+      // regions[0] is the country; the rest are continent / remote flags.
+      country: (Array.isArray(c.regions) && c.regions[0]) || null,
+      team_size: Number.isFinite(c.team_size) ? c.team_size : null,
+      status: c.status || null,
+      stage: c.stage || null,
+      is_hiring: c.isHiring ? 1 : 0,
+      top_company: c.top_company ? 1 : 0,
+      is_ai: looksLikeAI(tags, c.one_liner, c.name) ? 1 : 0,
+      tags: JSON.stringify(tags),
+      one_liner: c.one_liner || null,
+    };
+  });
+  const ins = db.prepare(`INSERT INTO venture_companies
+    (id,name,batch,batch_year,batch_season,industry,subindustry,country,team_size,status,stage,is_hiring,top_company,is_ai,tags,one_liner)
+    VALUES (@id,@name,@batch,@batch_year,@batch_season,@industry,@subindustry,@country,@team_size,@status,@stage,@is_hiring,@top_company,@is_ai,@tags,@one_liner)`);
+  db.transaction(() => {
+    db.prepare('DELETE FROM venture_companies').run();
+    for (const r of rows) if (Number.isFinite(r.id)) ins.run(r);
+  })();
+  return rows.length;
+}
+
+// ---- refresh orchestration --------------------------------------------------
+let refreshInFlight = null;
+
+async function refreshSignals({ force = false } = {}) {
+  const fredAt = Number(metaGet('signals_fred_at') || 0);
+  const ycAt = Number(metaGet('signals_yc_at') || 0);
+  const now = Date.now();
+  const doFred = force || now - fredAt > SIGNALS_TTL_MS;
+  const doYc = force || now - ycAt > VENTURE_TTL_MS;
+  const errors = [];
+
+  if (doFred) {
+    const fredMetrics = SIGNAL_CATALOG.filter((m) => m.source === 'fred');
+    const res = await pool(fredMetrics, 4, async (m) => writeSeries(m.key, await fetchFredSeries(m.source_id)));
+    for (const r of res) if (r.error) errors.push(`${r.item.key}: ${r.error}`);
+    try { writeSeries('crypto_fng', await fetchCryptoFng()); } catch (e) { errors.push(`crypto_fng: ${e.message}`); }
+    // Derived series and the composite are rebuilt from whatever landed, so a single
+    // failed feed degrades the score's component count instead of breaking the page.
+    try { computeDerivedSeries(); computeFearSeries(); } catch (e) { errors.push(`derived: ${e.message}`); }
+    // Only stamp success if at least most of it worked, so a network blip retries soon.
+    if (errors.length < fredMetrics.length / 2) metaSet('signals_fred_at', String(now));
+  }
+  if (doYc) {
+    try { await fetchVenture(); metaSet('signals_yc_at', String(now)); }
+    catch (e) { errors.push(`venture: ${e.message}`); }
+  }
+  if (errors.length) console.error('signals refresh:', errors.join(' | '));
+  return { refreshed: { fred: doFred, venture: doYc }, errors };
+}
+
+function signalsAreEmpty() {
+  return !db.prepare('SELECT 1 FROM signal_values LIMIT 1').get();
+}
+
+// On a cold database the first request has to wait — there is nothing to show otherwise.
+// Once there is history, a stale refresh happens in the background and the request is
+// served from SQLite, so opening the tab is always instant after the first time.
+async function ensureSignals() {
+  if (signalsAreEmpty()) {
+    if (!refreshInFlight) refreshInFlight = refreshSignals({ force: true }).finally(() => { refreshInFlight = null; });
+    await refreshInFlight;
+    return;
+  }
+  const stale = Date.now() - Number(metaGet('signals_fred_at') || 0) > SIGNALS_TTL_MS
+    || Date.now() - Number(metaGet('signals_yc_at') || 0) > VENTURE_TTL_MS;
+  if (stale && !refreshInFlight) {
+    refreshInFlight = refreshSignals().finally(() => { refreshInFlight = null; });
+    refreshInFlight.catch(() => { /* logged in refreshSignals */ });
+  }
+}
+
+// Change over a lookback, in the metric's own units — the number next to each tile.
+function changeOver(arr, days) {
+  if (arr.length < 2) return null;
+  const last = arr[arr.length - 1];
+  const cutoff = new Date(last.date).getTime() - days * 86400000;
+  let ref = null;
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (new Date(arr[i].date).getTime() <= cutoff) { ref = arr[i]; break; }
+  }
+  if (!ref) ref = arr[0];
+  return { from: ref.value, abs: last.value - ref.value, from_date: ref.date };
+}
+
+const SIGNAL_PERIOD_DAYS = { '1M': 31, '3M': 92, '6M': 184, '1Y': 366, '3Y': 1096, ALL: 100000 };
+
+app.get('/api/signals', async (req, res) => {
+  try {
+    await ensureSignals();
+    const metrics = db.prepare('SELECT * FROM signal_metrics ORDER BY sort_order, key').all();
+    const spark = Number(req.query.spark) === 0 ? 0 : 90; // days of sparkline per tile
+    const tiles = metrics.map((m) => {
+      const arr = seriesArray(m.key);
+      const last = arr[arr.length - 1] || null;
+      const cutoff = last ? new Date(last.date).getTime() - spark * 86400000 : 0;
+      return {
+        ...m,
+        value: last?.value ?? null,
+        as_of: last?.date ?? null,
+        d1: changeOver(arr, 1),
+        d30: changeOver(arr, 30),
+        d365: changeOver(arr, 365),
+        points: spark ? arr.filter((p) => new Date(p.date).getTime() >= cutoff) : [],
+      };
+    });
+    const fear = tiles.find((t) => t.key === 'fear_index') || null;
+    let breakdown = null;
+    try { breakdown = JSON.parse(metaGet('fear_breakdown') || 'null'); } catch { breakdown = null; }
+    res.json({
+      fear: fear ? { ...fear, label_text: fearLabel(fear.value), breakdown } : null,
+      groups: {
+        risk: tiles.filter((t) => t.grp === 'risk' && t.key !== 'fear_index'),
+        rates: tiles.filter((t) => t.grp === 'rates'),
+        macro: tiles.filter((t) => t.grp === 'macro'),
+      },
+      fetched_at: Number(metaGet('signals_fred_at') || 0) || null,
+      refreshing: !!refreshInFlight,
+    });
+  } catch (err) {
+    res.status(502).json({ error: `Could not load market signals: ${err.message}` });
+  }
+});
+
+app.get('/api/signals/series/:key', (req, res) => {
+  const meta = db.prepare('SELECT * FROM signal_metrics WHERE key = ?').get(req.params.key);
+  if (!meta) return res.status(404).json({ error: 'Unknown metric.' });
+  const days = SIGNAL_PERIOD_DAYS[req.query.period] ?? SIGNAL_PERIOD_DAYS['1Y'];
+  const arr = seriesArray(meta.key);
+  const last = arr[arr.length - 1];
+  const cutoff = last ? new Date(last.date).getTime() - days * 86400000 : 0;
+  res.json({ ...meta, points: arr.filter((p) => new Date(p.date).getTime() >= cutoff) });
+});
+
+app.post('/api/signals/refresh', async (req, res) => {
+  try {
+    if (!refreshInFlight) refreshInFlight = refreshSignals({ force: true }).finally(() => { refreshInFlight = null; });
+    const out = await refreshInFlight;
+    res.json(out);
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ---- venture map ------------------------------------------------------------
+// Everything here is an aggregate over venture_companies. Batches before 2012 were tiny
+// (7-22 companies), so a share computed on them swings wildly; the UI charts from 2012.
+app.get('/api/venture', async (req, res) => {
+  try {
+    await ensureSignals();
+    const total = db.prepare('SELECT COUNT(*) n FROM venture_companies').get()?.n || 0;
+    if (!total) return res.json({ empty: true, batches: [], sectors: [], industries: [], as_of: null });
+
+    const batches = db.prepare(`
+      SELECT batch, batch_year, batch_season,
+             COUNT(*)                                           AS companies,
+             ROUND(100.0 * SUM(is_ai) / COUNT(*), 1)             AS ai_share,
+             ROUND(100.0 * SUM(is_hiring) / COUNT(*), 1)         AS hiring_share,
+             ROUND(100.0 * SUM(CASE WHEN country <> 'United States of America' THEN 1 ELSE 0 END) / COUNT(*), 1) AS non_us_share,
+             SUM(CASE WHEN country = 'United Kingdom' THEN 1 ELSE 0 END)                       AS uk_companies,
+             ROUND(100.0 * SUM(CASE WHEN status IN ('Acquired','Public') THEN 1 ELSE 0 END) / COUNT(*), 1) AS exit_share,
+             ROUND(100.0 * SUM(CASE WHEN status = 'Inactive' THEN 1 ELSE 0 END) / COUNT(*), 1) AS dead_share,
+             ROUND(AVG(NULLIF(team_size, 0)), 1)                 AS avg_team,
+             ROUND(100.0 * SUM(CASE WHEN tags <> '[]' THEN 1 ELSE 0 END) / COUNT(*), 1) AS tag_coverage
+      FROM venture_companies
+      WHERE batch_year IS NOT NULL AND batch_season IS NOT NULL
+      GROUP BY batch_year, batch_season
+      ORDER BY batch_year, batch_season`).all();
+
+    // Sector mix per batch, as a share of that batch — the stacked-area view.
+    const sectors = db.prepare(`
+      SELECT batch_year, batch_season, batch, industry, COUNT(*) AS n
+      FROM venture_companies
+      WHERE batch_year >= 2012 AND industry IS NOT NULL
+      GROUP BY batch_year, batch_season, industry
+      ORDER BY batch_year, batch_season`).all();
+
+    const industries = db.prepare(`
+      SELECT industry, COUNT(*) AS n,
+             SUM(CASE WHEN batch_year >= 2024 THEN 1 ELSE 0 END) AS recent,
+             ROUND(100.0 * SUM(is_ai) / COUNT(*), 1)             AS ai_share
+      FROM venture_companies WHERE industry IS NOT NULL
+      GROUP BY industry ORDER BY n DESC`).all();
+
+    const subindustries = db.prepare(`
+      SELECT subindustry, COUNT(*) AS n
+      FROM venture_companies
+      WHERE batch_year >= 2025 AND subindustry IS NOT NULL
+      GROUP BY subindustry ORDER BY n DESC LIMIT 15`).all();
+
+    const countries = db.prepare(`
+      SELECT country, COUNT(*) AS n,
+             SUM(CASE WHEN batch_year >= 2024 THEN 1 ELSE 0 END) AS recent
+      FROM venture_companies WHERE country IS NOT NULL
+      GROUP BY country ORDER BY recent DESC, n DESC LIMIT 12`).all();
+
+    // A batch still being assembled (YC publishes companies as they are announced) has a
+    // company count far below a real one. Flagged rather than dropped: the table should
+    // still show it, but no trend line should be drawn through a batch of 21.
+    const typical = batches.filter((b) => b.batch_year >= 2019).map((b) => b.companies).sort((a, b) => a - b);
+    const median = typical.length ? typical[Math.floor(typical.length / 2)] : 0;
+    for (const b of batches) {
+      b.partial = b.companies < Math.max(25, median * 0.4) ? 1 : 0;
+      // Thin upstream metadata. The one-liner fallback recovers most of a badly tagged
+      // batch but not all of it, so these points are still likely to UNDERSTATE AI share.
+      // Flagged so the chart can draw them as estimates rather than as measurements.
+      b.low_confidence = b.tag_coverage != null && b.tag_coverage < 60 ? 1 : 0;
+    }
+
+    res.json({
+      empty: false,
+      total,
+      batches,
+      sectors,
+      industries,
+      subindustries,
+      countries,
+      as_of: Number(metaGet('signals_yc_at') || 0) || null,
+    });
+  } catch (err) {
+    res.status(502).json({ error: `Could not load the venture map: ${err.message}` });
+  }
+});
+
+// Warm the cache shortly after boot so the first visit to the tab is already populated.
+// Deliberately not awaited: a slow or blocked network must never delay listen().
+setTimeout(() => { refreshSignals().catch(() => { /* logged inside */ }); }, 2000);
+
 // ---- Serve the built UI ----
 // Registered last so it never shadows an /api route. With the frontend served from the
 // same origin as the API there's one URL, one port, and no CORS involved at all — which

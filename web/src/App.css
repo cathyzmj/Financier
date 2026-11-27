@@ -923,3 +923,135 @@ tbody tr:hover td { background: var(--input); }
   .field-row { flex-direction: column; }
   .modal { max-height: 88vh; overflow-y: auto; }
 }
+
+/* ============================ MARKET SIGNALS ============================
+   Same Bauhaus vocabulary as everything above: hairline rules, square corners,
+   mono tabular numerals. Market mood is carried by brick (fear) and cobalt (greed)
+   because --positive / --negative stay reserved for actual money. */
+
+.sig-body { display: flex; flex-direction: column; gap: 20px; margin-top: 20px; }
+.sig-asof { font-size: 0.6rem; }
+
+/* ---- metric tiles ---- */
+.sig-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 14px;
+}
+.sig-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--rule);
+  background: var(--panel);
+  padding: 14px 14px 12px;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  transition: background 0.12s, border-color 0.12s;
+}
+.sig-tile:hover { background: var(--input); border-color: var(--cobalt); }
+.sig-tile.active { border-color: var(--cobalt); border-width: 2px; padding: 13px 13px 11px; }
+.sig-tile-label {
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.sig-tile-value {
+  font-family: var(--font-mono);
+  font-size: 1.5rem;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  text-transform: none;
+}
+/* Neutral on purpose: a rising VIX and a rising S&P are not the same news, and the
+   tile has no way to know which direction is good for the metric it is showing. */
+.sig-tile-delta { font-size: 0.6rem; color: var(--muted); text-transform: none; letter-spacing: 0.04em; }
+.sig-spark { height: 34px; margin: 2px 0 4px; }
+.sig-tile-blurb { font-size: 0.68rem; line-height: 1.35; color: var(--muted); }
+.sig-tile-asof { font-size: 0.55rem; color: var(--border); margin-top: 2px; }
+.sig-detail { margin-bottom: 4px; }
+.sig-close {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  width: 26px;
+  height: 26px;
+  cursor: pointer;
+  font-size: 0.7rem;
+  line-height: 1;
+}
+.sig-close:hover { border-color: var(--brick); color: var(--brick); }
+
+/* ---- the composite ---- */
+.fear-head { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 2fr); gap: 28px; align-items: start; }
+@media (max-width: 860px) { .fear-head { grid-template-columns: 1fr; gap: 18px; } }
+.fear-score-col { display: flex; flex-direction: column; }
+.fear-score {
+  font-family: var(--font-display);
+  font-size: 4.2rem;
+  font-weight: 800;
+  line-height: 0.92;
+  letter-spacing: -0.03em;
+}
+.fear-label {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-top: 8px;
+}
+.fear-compare { font-size: 0.6rem; color: var(--muted); margin-top: 12px; text-transform: none; letter-spacing: 0.04em; }
+
+.fear-band-wrap { padding-top: 8px; }
+.fear-band { position: relative; display: flex; height: 26px; border: 1px solid var(--rule); }
+.fear-band > span { display: block; height: 100%; }
+.fear-marker {
+  position: absolute;
+  top: -7px;
+  bottom: -7px;
+  width: 3px;
+  background: var(--rule);
+  transform: translateX(-1.5px);
+}
+.fear-scale {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 7px;
+  font-size: 0.55rem;
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0.04em;
+}
+
+.fear-parts { display: flex; flex-direction: column; gap: 9px; }
+.fear-part { display: grid; grid-template-columns: 170px minmax(0, 1fr) 36px 68px; gap: 12px; align-items: center; }
+@media (max-width: 700px) { .fear-part { grid-template-columns: 120px minmax(0, 1fr) 32px 56px; gap: 8px; } }
+.fear-part-label { font-size: 0.76rem; }
+.fear-part-bar { height: 12px; background: var(--input); border: 1px solid var(--border); }
+.fear-part-bar > span { display: block; height: 100%; }
+.fear-part-score { font-size: 0.78rem; text-align: right; font-variant-numeric: tabular-nums; text-transform: none; }
+.fear-part-raw { font-size: 0.64rem; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; text-transform: none; }
+
+/* ---- venture map ---- */
+.sig-stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+.sig-stat { border: 1px solid var(--rule); background: var(--panel); padding: 14px; display: flex; flex-direction: column; gap: 4px; }
+.sig-stat-label { font-size: 0.6rem; }
+.sig-stat-value { font-family: var(--font-mono); font-size: 1.7rem; font-variant-numeric: tabular-nums; text-transform: none; letter-spacing: -0.02em; color: var(--text); }
+.sig-stat-note { font-size: 0.65rem; color: var(--muted); }
+
+.sig-two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; }
+
+.sig-bars { display: flex; flex-direction: column; gap: 7px; }
+.sig-bar-row { display: grid; grid-template-columns: minmax(0, 1fr) 110px 40px; gap: 10px; align-items: center; }
+.sig-bar-label { font-size: 0.72rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sig-bar-track { height: 11px; background: var(--input); border: 1px solid var(--border); }
+.sig-bar-track > span { display: block; height: 100%; background: var(--brick); }
+.sig-bar-n { font-size: 0.68rem; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; text-transform: none; }
+
+/* A batch still being announced: shown, but visibly not solid ground. */
+.sig-row-soft { opacity: 0.55; }

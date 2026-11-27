@@ -14,6 +14,10 @@ It tracks:
 - **Cash** — a monthly budget with categorised expenses and a live-FX overview.
 - **Overview** — net worth across everything, converted to a base currency you
   choose, plus an allocation pie and a reconstructed portfolio value/performance chart.
+- **Signals** — market conditions, entirely fetched, with nothing to type in: a
+  self-computed fear & greed index built from seven components, 27 risk/rates/macro
+  metrics with history, and a venture map of YC's whole public company directory.
+  Sources are FRED, alternative.me and yc-oss — all free, none needing an API key.
 - **Backup** — one-click JSON export/import.
 
 ---
